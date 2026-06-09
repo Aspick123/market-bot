@@ -14,6 +14,8 @@
 ║  python bot_market.py                                        ║
 ╚══════════════════════════════════════════════════════════════╝
 """
+import json, os, time, logging, datetime
+from collections import defaultdict
 from threading import Thread
 from flask import Flask
 
@@ -21,16 +23,14 @@ app = Flask("")
 
 @app.route("/")
 def home():
-    return "Le bot Marketplace est en ligne !"
+    return "OK"
 
 def run():
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10000, threaded=True)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-keep_alive()
+# Lancement en arrière-plan immédiat et non-bloquant
+flask_thread = Thread(target=run, daemon=True)
+flask_thread.start()
 
 
 import json, os, time, logging, datetime
