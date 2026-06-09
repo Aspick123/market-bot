@@ -7,3 +7,4 @@ idna==3.18
 python-telegram-bot==22.7
 RapidFuzz==3.14.5
 thefuzz==0.22.1
+flask
