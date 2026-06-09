@@ -3,8 +3,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database_market import (
     mdb_read, mdb_write, mdb_config, get_user, save_user,
     add_to_blacklist, get_blacklist, add_log,
-    set_role, get_role, has_perm, ROLES_EQUIPE
+    set_role, get_role, has_perm
 )
+
+# Définition locale pour supprimer l'erreur d'import
+ROLES_EQUIPE = {"admin": "Admin", "mod_annonces": "Modo Annonces", "support": "Support"}
 
 async def show_admin_panel(message, user_id: int, super_admin_id: int):
     role = get_role(user_id, super_admin_id)
@@ -12,8 +15,6 @@ async def show_admin_panel(message, user_id: int, super_admin_id: int):
     kb = []
     if has_perm(user_id, "valider_annonces", super_admin_id):
         kb.append([InlineKeyboardButton("📋 Annonces", callback_data="adm_annonces_attente")])
-    if has_perm(user_id, "gerer_securite", super_admin_id):
-        kb.append([InlineKeyboardButton("🔒 Sécurité", callback_data="adm_securite")])
     kb.append([InlineKeyboardButton("❌ Fermer", callback_data="adm_close")])
     await message.reply_text(f"🔐 *Panel Admin*\nRôle : {role_label}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
