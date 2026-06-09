@@ -25,7 +25,7 @@ from gamification import handle_gamification_callbacks, show_leaderboard
 from admin_market import handle_admin_market_callbacks, handle_admin_input
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "7900760431:AAFiNIsyPscuR-lX_2W4H8M_q6FwFOfw9I0")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEf5EcX6TzgGsaT8KZWRiAEK42h4FJjc0k")
 SUPER_ADMIN_ID = 7132924157
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
