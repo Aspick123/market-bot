@@ -5,19 +5,17 @@ from flask import Flask
 # ══════════════════════════════════════════════════════════════
 # ✅ CONFIGURATION DU SERVEUR (Correcte pour Render)
 # ══════════════════════════════════════════════════════════════
+# --- Remplace ton bloc actuel par celui-ci ---
 app = Flask("")
-
 @app.route("/")
-def home(): 
-    return "Le bot est en ligne !"
+def home(): return "Le bot est en ligne !"
 
 def run(): 
-    # Utilise le port fourni par Render, ou 10000 par défaut
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True)
 
 Thread(target=run, daemon=True).start()
-# ══════════════════════════════════════════════════════════════
+# ---------------------------------------------
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
