@@ -67,3 +67,24 @@ def is_mode_urgence() -> bool:
         return cfg.get("mode_urgence", False)
     return False
 
+def create_annonce(vendeur_id: int, categorie: str, description: str, prix: str) -> str:
+    """Enregistre une nouvelle annonce dans la collection MongoDB."""
+    import uuid
+    annonce_id = str(uuid.uuid4())[:8] # Génère un ID unique court à 8 caractères
+    
+    annonce = {
+        "_id": annonce_id,
+        "vendeur_id": vendeur_id,
+        "categorie": categorie,
+        "description": description,
+        "prix": prix,
+        "statut": "disponible", # disponible / vendu / en_litige
+        "date_publication": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    annonces_col.insert_one(annonce)
+    return annonce_id
+
+def get_user_annonces(vendeur_id: int) -> list:
+    """Récupère toutes les annonces publiées par un utilisateur spécifique."""
+    return list(annonces_col.find({"vendeur_id": vendeur_id}))
+

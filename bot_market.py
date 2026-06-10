@@ -4,13 +4,14 @@ import logging
 from threading import Thread
 from flask import Flask
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    ConversationHandler,
     filters
 )
 
@@ -19,9 +20,13 @@ from database_market import (
     save_user,
     get_role_label,
     is_flooded,
-    is_mode_urgence
+    is_mode_urgence,
+    create_annonce
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
+
+# États de la conversation pour la création d'une annonce
+CHOIX_CATEGORIE, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION = range(4)
 
 app = Flask("")
 
@@ -48,11 +53,11 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     if is_mode_urgence() and uid != SUPER_ADMIN_ID:
         await update.effective_message.reply_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
-        return
+        return ConversationHandler.END
         
     if is_flooded(uid):
         await update.effective_message.reply_text("⏳ Trop de requêtes. Veuillez patienter.")
-        return
+        return ConversationHandler.END
 
     user_data = get_user(uid)
     if not user_data.get("username") or user_data["username"] != user.username:
@@ -75,20 +80,110 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    
+    return ConversationHandler.END
+
+# ---------------- LOGIQUE DU MODULE VENTE ----------------
+
+async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Déclenchée quand l'utilisateur clique sur '➕ Vendre'."""
+    query = update.callback_query
+    await query.answer()
+    
+    kb = [
+        [InlineKeyboardButton("🎮 Comptes de Jeu", callback_data="cat:Comptes")],
+        [InlineKeyboardButton("💰 Monnaies Virtuelles / Items", callback_data="cat:Monnaies")],
+        [InlineKeyboardButton("🔙 Annuler", callback_data="menu:retour_start")]
+    ]
+    
+    await query.message.edit_text(
+        "📁 **Étape 1 :** Choisissez la catégorie de votre produit :",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return CHOIX_CATEGORIE
+
+async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enregistre la catégorie et demande la description."""
+    query = update.callback_query
+    await query.answer()
+    
+    ctx.user_data["v_categorie"] = query.data.replace("cat:", "")
+    
+    await query.message.edit_text(
+        "📝 **Étape 2 :** Entrez la description de votre produit.\n"
+        "*(Ex: Compte Genshin AR58, Raiden + Furina, Serveur EU)*.\n\n"
+        "✍️ _Écrivez votre texte directement dans le chat puis envoyez._"
+    )
+    return ATTENTE_DESCRIPTION
+
+async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enregistre la description et demande le prix."""
+    ctx.user_data["v_description"] = update.message.text
+    
+    await update.message.reply_text(
+        "💶 **Étape 3 :** Quel est le prix de votre article ?\n"
+        "*(Ex: 250 USDT, 15 000 FCFA)*"
+    )
+    return ATTENTE_PRIX
+
+async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enregistre le prix et demande la confirmation finale."""
+    ctx.user_data["v_prix"] = update.message.text
+    
+    resume = (
+        "📊 **Récapitulatif de votre annonce :**\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"📁 **Catégorie :** {ctx.user_data['v_categorie']}\n"
+        f"📝 **Description :** {ctx.user_data['v_description']}\n"
+        f"💰 **Prix demandé :** {ctx.user_data['v_prix']}\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        "Souhaitez-vous publier cette annonce sur le marché ?"
+    )
+    
+    kb = [
+        [InlineKeyboardButton("✅ Publier l'annonce", callback_data="publier:oui")],
+        [InlineKeyboardButton("❌ Annuler et tout effacer", callback_data="menu:retour_start")]
+    ]
+    
+    await update.message.reply_text(resume, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return CONFIRMATION
+
+async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enregistre définitivement l'annonce dans MongoDB."""
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    if query.data == "publier:oui":
+        id_annonce = create_annonce(
+            vendeur_id=uid,
+            categorie=ctx.user_data["v_categorie"],
+            description=ctx.user_data["v_description"],
+            prix=ctx.user_data["v_prix"]
+        )
+        
+        await query.message.edit_text(
+            f"🎉 **Félicitations !** Votre annonce a été publiée avec succès.\n"
+            f"🆔 **Référence de l'annonce :** `{id_annonce}`",
+            reply_markup=get_back_to_start_keyboard(),
+            parse_mode="Markdown"
+        )
+    ctx.user_data.clear()
+    return ConversationHandler.END
+
+# ---------------- FIN DU MODULE VENTE ----------------
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = update.effective_user.id
     data = query.data
-    
     await query.answer()
     
     if is_mode_urgence() and uid != SUPER_ADMIN_ID:
         await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
         return
         
-    if is_flooded(uid):
-        return
+    if is_flooded(uid): return
 
     logger.info(f"Bouton cliqué : {data} par {uid}")
 
@@ -118,7 +213,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
             
-        elif data in ["menu:recherche", "menu:vendre", "menu:mes_annonces", "menu:historique", 
+        elif data in ["menu:recherche", "menu:mes_annonces", "menu:historique", 
                       "menu:parrainage", "menu:defis", "menu:leaderboard", "menu:litige", 
                       "menu:alertes", "menu:blacklist", "menu:admin_panel"]:
             feature_name = data.replace("menu:", "").replace("_", " ").title()
@@ -136,10 +231,24 @@ def main():
     flask_thread.start()
     
     application = ApplicationBuilder().token(TOKEN).build()
+    
+    vente_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
+        states={
+            CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
+            ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
+            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
+            CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:oui")]
+        },
+        fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
+        allow_reentry=True
+    )
+    
+    application.add_handler(vente_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot démarré !")
+    logger.info("🚀 Bot démarré avec le module Vente actif !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
