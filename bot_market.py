@@ -35,7 +35,7 @@ from reputation import handle_reputation_callbacks, handle_reputation_input
 from parrainage import handle_parrainage_callbacks
 from cgu import handle_cgu_callbacks, handle_cgu_input
 from gamification import handle_gamification_callbacks
-from admin_market import handle_admin_market_callbacks, handle_admin_input, show_admin_panel
+from admin_market import handle_admin_market_callbacks, handle_admin_market_input, show_admin_panel
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
