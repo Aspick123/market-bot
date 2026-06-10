@@ -400,8 +400,8 @@ def main():
     
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
-        states={
-            CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
+            states={
+        CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
         
         # ➕ Étape insérée si l'utilisateur écrit lui-même son jeu
         ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
@@ -413,7 +413,8 @@ def main():
         CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
         
         CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")]
-        },
+    },
+
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
     )
