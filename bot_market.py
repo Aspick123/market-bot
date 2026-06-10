@@ -27,6 +27,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
 # États de la conversation pour la création d'une annonce
 CHOIX_CATEGORIE, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION = range(4)
+ATTENTE_AUTRE_JEU, CHOIX_PAIEMENT = range(4, 6)
 
 app = Flask("")
 
@@ -401,9 +402,17 @@ def main():
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
             CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
-            ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
-            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
-            CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:oui")]
+        
+        # ➕ Étape insérée si l'utilisateur écrit lui-même son jeu
+        ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
+        
+        ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
+        ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
+        
+        # ➕ Nouvelle étape insérée pour le choix multiple des paiements
+        CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
+        
+        CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")]
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
