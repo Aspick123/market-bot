@@ -1,15 +1,21 @@
-import json, os, time, logging, datetime
-from collections import defaultdict
+import os
 from threading import Thread
 from flask import Flask
 
 # ══════════════════════════════════════════════════════════════
-# ⚠️ NE PAS MODIFIER CE BLOC — Requis pour Render
+# ✅ CONFIGURATION DU SERVEUR (Correcte pour Render)
 # ══════════════════════════════════════════════════════════════
 app = Flask("")
+
 @app.route("/")
-def home(): return "OK"
-def run(): app.run(host="0.0.0.0", port=10000, threaded=True)
+def home(): 
+    return "Le bot est en ligne !"
+
+def run(): 
+    # Utilise le port fourni par Render, ou 10000 par défaut
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
+
 Thread(target=run, daemon=True).start()
 # ══════════════════════════════════════════════════════════════
 
