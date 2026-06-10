@@ -253,16 +253,14 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Indique à Telegram que le clic a été reçu (enlève le sablier)
+    await query.answer()  # Enlève le sablier de chargement sur Telegram
     
-    # --- EXTRACTION DES VARIABLES ESSENTIELLES ---
+    # --- EXTRACTION DES VARIABLES ESSENTIELLES (NE PAS SUPPRIMER) ---
     data = query.data
     msg = query.message
     uid = update.effective_user.id
     
-    print(f"DEBUG_CLIC: {data}")  # Ton super outil de suivi dans Render
-    
-    # Redirection vers les modules externes si nécessaire
+    # Redirection vers les modules externes
     if await handle_recherche_callbacks(query, ctx): return
     if await handle_transactions_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
     if await handle_litiges_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
