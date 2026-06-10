@@ -261,6 +261,7 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    print(f"DEBUG_CLIC: {query.data}")
     print(f"DEBUG: Clic reçu avec data: {query.data}")
     await query.answer()
     msg = query.message
