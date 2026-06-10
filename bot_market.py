@@ -27,6 +27,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
 # États de la conversation pour la création d'une annonce
 CHOIX_CATEGORIE, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION = range(4)
+ATTENTE_AUTRE_JEU, CHOIX_PAIEMENT, CHOIX_DEVISE = range(4, 7)
 ATTENTE_AUTRE_JEU, CHOIX_PAIEMENT = range(4, 6)
 
 app = Flask("")
@@ -136,31 +137,67 @@ async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_description"] = update.message.text
+    
+    # Nouvelle transition : On propose d'abord de choisir la devise
+    kb = [
+        [InlineKeyboardButton("💵 FCFA (XOF)", callback_data="devise:FCFA")],
+        [InlineKeyboardButton("💵 Dollar ($)", callback_data="devise:USD")],
+        [InlineKeyboardButton("💶 Euro (€)", callback_data="devise:EUR")]
+    ]
+    
     await update.message.reply_text(
-        "💰 **Étape 3 : Fixer le prix**\n\nEntrez le prix de vente souhaité en **FCFA (XOF)**.\n*(Entrez uniquement un nombre entier)*",
+        "💱 **Étape 3 : Choix de la devise**\n\nDans quelle devise souhaitez-vous fixer le prix de votre compte ?",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
-    return ATTENTE_PRIX
+    return ATTENTE_PRIX  # On réutilise le même état, mais on intercepte d'abord le callback
 
 async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    texte_prix = update.message.text.strip()
-    if not texte_prix.isdigit():
-        await update.message.reply_text("❌ Veuillez entrer un prix valide (uniquement des chiffres) :")
+    query = update.callback_query
+    
+    # 1. Si c'est le clic sur la devise
+    if query and query.data.startswith("devise:"):
+        await query.answer()
+        choix_devise = query.data.split(":")[1]
+        ctx.user_data["vente_devise"] = choix_devise
+        
+        await query.message.edit_text(
+            f"💰 **Étape 3.5 : Fixer le montant ({choix_devise})**\n\n"
+            f"Entrez le prix de vente souhaité en **{choix_devise}**.\n"
+            "*(Entrez uniquement un nombre entier, sans texte ni symboles)*",
+            parse_mode="Markdown"
+        )
         return ATTENTE_PRIX
-    ctx.user_data["vente_prix"] = int(texte_prix)
-    ctx.user_data["vente_paiements"] = []
-    return await afficher_choix_paiement(update.message.reply_text, ctx)
+
+    # 2. Si c'est le texte contenant le montant numérique
+    if update.message:
+        texte_prix = update.message.text.strip()
+        if not texte_prix.isdigit():
+            await update.message.reply_text("❌ Veuillez entrer un montant valide (uniquement des chiffres) :")
+            return ATTENTE_PRIX
+            
+        ctx.user_data["vente_prix"] = int(texte_prix)
+        ctx.user_data["vente_paiements"] = []
+        
+        # On passe à l'affichage des moyens de paiement
+        return await afficher_choix_paiement(update.message.reply_text, ctx)
 
 async def afficher_choix_paiement(reply_func, ctx):
     choix = ctx.user_data.get("vente_paiements", [])
     check = lambda m: "☑️" if m in choix else "⬜"
+    
+    # Nettoyage complet des parenthèses comme demandé 
     kb = [
-        [InlineKeyboardButton(f"{check('CFA')} 💵 FCFA (Airtel / Moov / Wave)", callback_data="pay:CFA")],
+        [InlineKeyboardButton(f"{check('FCFA')} 💵 FCFA", callback_data="pay:FCFA")],
         [InlineKeyboardButton(f"{check('USDT')} 🪙 USDT (Binance TRC20)", callback_data="pay:USDT")],
+        [InlineKeyboardButton(f"{check('PayPal')} 💳 PayPal", callback_data="pay:PayPal")],
         [InlineKeyboardButton("✅ Confirmer la sélection", callback_data="pay:valider")]
     ]
+    
     await reply_func(
-        "💳 **Étape 4 : Moyens de paiement acceptés**\n\nSélectionnez la ou les méthodes que vous acceptez.\n*(Cochez/décochez, puis validez)*",
+        "💳 **Étape 4 : Moyens de paiement acceptés**\n\n"
+        "Sélectionnez les méthodes de paiement que vous acceptez pour cette vente.\n"
+        "*(Cochez/décochez les options, puis validez)*",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
@@ -170,22 +207,29 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     data = query.data
+    
     choix = ctx.user_data.get("vente_paiements", [])
+    
     if data == "pay:valider":
         if not choix:
             kb = [[InlineKeyboardButton("🔄 Réessayer", callback_data="pay:refresh")]]
             await query.message.edit_text("⚠️ Vous devez sélectionner au moins un moyen de paiement.", reply_markup=InlineKeyboardMarkup(kb))
             return CHOIX_PAIEMENT
+            
         cat = ctx.user_data["vente_categorie"]
         desc = ctx.user_data["vente_description"]
         prix = ctx.user_data["vente_prix"]
+        devise = ctx.user_data.get("vente_devise", "XOF")
         methodes = ", ".join(choix)
+        
         recap = (
-            "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             f"📦 **Jeu :** `{cat}`\n"
             f"📝 **Description :**\n{desc}\n\n"
-            f"💰 **Prix demandé :** `{prix} XOF`\n"
-            f"💳 **Paiements :** `{methodes}`\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            f"💰 **Prix demandé :** `{prix} {devise}`\n"
+            f"💳 **Paiements acceptés :** `{methodes}`\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             "Souhaitez-vous valider et publier cette annonce ?"
         )
         kb = [
@@ -194,16 +238,20 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         ]
         await query.message.edit_text(recap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return CONFIRMATION
+
     methode = data.replace("pay:", "")
     if methode in choix:
         choix.remove(methode)
     else:
         choix.append(methode)
+        
     ctx.user_data["vente_paiements"] = choix
+    
     check = lambda m: "☑️" if m in choix else "⬜"
     kb = [
-        [InlineKeyboardButton(f"{check('CFA')} 💵 FCFA (Airtel / Moov / Wave)", callback_data="pay:CFA")],
+        [InlineKeyboardButton(f"{check('FCFA')} 💵 FCFA", callback_data="pay:FCFA")],
         [InlineKeyboardButton(f"{check('USDT')} 🪙 USDT (Binance TRC20)", callback_data="pay:USDT")],
+        [InlineKeyboardButton(f"{check('PayPal')} 💳 PayPal", callback_data="pay:PayPal")],
         [InlineKeyboardButton("✅ Confirmer la sélection", callback_data="pay:valider")]
     ]
     await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
