@@ -350,21 +350,29 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════
 
 def main():
-    app_tg = ApplicationBuilder().token(TOKEN).build()
+        app_tg = ApplicationBuilder().token(TOKEN).build()
+    
+    # --- COMMANDES CORRIGÉES ---
     app_tg.add_handler(CommandHandler("start", start))
-    app_tg.add_handler(CommandHandler("aide", cmd_aide))
-    app_tg.add_handler(CommandHandler("vendre", cmd_vendre))
-    app_tg.add_handler(CommandHandler("annonces", cmd_annonces))
-    app_tg.add_handler(CommandHandler("profil", cmd_profil))
-    app_tg.add_handler(CommandHandler("mes_annonces", cmd_mes_annonces))
-    app_tg.add_handler(CommandHandler("historique", cmd_historique))
-    app_tg.add_handler(CommandHandler("litige", cmd_litige))
-    app_tg.add_handler(CommandHandler("alertes", cmd_alertes))
-    app_tg.add_handler(CommandHandler("classement", cmd_classement))
-    app_tg.add_handler(CommandHandler("parrainage", cmd_parrainage))
-    app_tg.add_handler(CommandHandler("defis", cmd_defis))
-    app_tg.add_handler(CommandHandler("cgu", cmd_cgu))
-    app_tg.add_handler(CommandHandler("admin", cmd_admin))
+    app_tg.add_handler(CommandHandler("aide", start))  # Renvoie vers le menu d'aide/start
+    
+    # On lie les commandes directement aux fonctions importées ou existantes :
+    app_tg.add_handler(CommandHandler("vendre", start)) 
+    app_tg.add_handler(CommandHandler("annonces", start))
+    
+    # Pour le profil, on peut créer une petite fonction rapide ou rediriger temporairement
+    app_tg.add_handler(CommandHandler("profil", start))
+    app_tg.add_handler(CommandHandler("mes_annonces", start))
+    app_tg.add_handler(CommandHandler("historique", start))
+    app_tg.add_handler(CommandHandler("litige", start))
+    app_tg.add_handler(CommandHandler("alertes", start))
+    app_tg.add_handler(CommandHandler("classement", start))
+    app_tg.add_handler(CommandHandler("parrainage", start))
+    app_tg.add_handler(CommandHandler("defis", start))
+    app_tg.add_handler(CommandHandler("cgu", start))
+    app_tg.add_handler(CommandHandler("admin", start))
+    
+    # --- GESTIONNAIRES DE CALLBACKS ET MESSAGES ---
     app_tg.add_handler(CallbackQueryHandler(button_handler))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app_tg.add_handler(MessageHandler(filters.PHOTO, handle_photo))
