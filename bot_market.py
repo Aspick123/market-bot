@@ -261,70 +261,80 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 2. On répond immédiatement à Telegram pour enlever le sablier de chargement
     await query.answer()
     
-    # 3. On redirige vers les modules de callbacks externes s'ils gèrent l'action
-    if await handle_recherche_callbacks(query, ctx): return
-    if await handle_transactions_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
-    if await handle_litiges_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
-    if await handle_alertes_callbacks(query, ctx): return
-    if await handle_reputation_callbacks(query, ctx, ctx.bot): return
-    if await handle_parrainage_callbacks(query, ctx, ctx.bot): return
-    if await handle_gamification_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
-    if await handle_admin_market_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+        # 3. On redirige vers les modules de callbacks externes s'ils gèrent l'action
+    try:
+        if await handle_recherche_callbacks(query, ctx): return
+        if await handle_transactions_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+        if await handle_litiges_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+        if await handle_alertes_callbacks(query, ctx): return
+        if await handle_reputation_callbacks(query, ctx, ctx.bot): return
+        if await handle_parrainage_callbacks(query, ctx, ctx.bot): return
+        if await handle_gamification_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+        if await handle_admin_market_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+    except Exception as error_callback:
+        print(f"⚠️ Un module externe a planté mais on continue : {error_callback}")
+        # --- CALLBACKS RESTANTS ---
+    try:
+        if data == "menu_vendre":
+            from cgu import user_a_accepte_cgu_vendeur
+            if not await user_a_accepte_cgu_vendeur(msg, uid, ctx): return
+            await start_creation_annonces(msg, uid)
 
-    # --- CALLBACKS RESTANTS ---
-    if data == "menu_vendre":
-        from cgu import user_a_accepte_cgu_vendeur
-        if not await user_a_accepte_cgu_vendeur(msg, uid, ctx): return
-        await start_creation_annonce(msg, uid)
-        
-    elif data == "menu_mes_annonces":
-        await show_mes_annonces(msg, uid)
-        
-    elif data == "menu_historique":
-        from transactions import show_historique
-        await show_historique(msg, uid)
-        
-    elif data == "menu_leaderboard":
-        await show_leaderboard(msg, "vendeurs")
-        
-    elif data == "menu_blacklist_publique":
-        from admin_market import show_blacklist_publique
-        await show_blacklist_publique(msg)
-        
-    elif data == "menu_alertes":
-        from alertes import show_menu_alertes
-        await show_menu_alertes(msg, uid)
-        
-    elif data == "menu_parrainage":
-        from parrainage import show_menu_parrainage
-        await show_menu_parrainage(msg, uid, ctx.bot)
-        
-    elif data == "menu_defis":
-        from gamification import show_mes_defis
-        await show_mes_defis(msg, uid)
-        
-    elif data == "menu_litige":
-        from litiges import start_litige
-        await start_litige(msg, uid, ctx)
-        
-    elif data == "menu_cgu":
-        from cgu import show_cgu
-        await show_cgu(msg)
-        
-    elif data == "menu_recherche":
-        from recherche import show_menu_recherche
-        await show_menu_recherche(msg)
-        
-    elif data == "retour_start":
-        # Pour éviter les doubles menus, on supprime l'ancien message avant de relancer start
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        await start(update, ctx)
-        
-    elif data == "adm_market_panel":
-        await show_admin_panel(msg, uid, SUPER_ADMIN_ID)
+        elif data == "menu_mes_annonces":
+            await show_mes_annonces(msg, uid)
+
+        elif data.startswith("voir_profil_"):
+            from annonces import show_profil
+            await show_profil(update, ctx)
+
+        elif data == "menu_historique":
+            from transactions import show_historique
+            await show_historique(msg, uid)
+
+        elif data == "menu_leaderboard":
+            await show_leaderboard(msg, "vendeurs")
+
+        elif data == "menu_blacklist_publique":
+            from admin_market import show_blacklist_publique
+            await show_blacklist_publique(msg)
+
+        elif data == "menu_alertes":
+            from alertes import show_menu_alertes
+            await show_menu_alertes(msg, uid)
+
+        elif data == "menu_parrainage":
+            from parrainage import show_menu_parrainage
+            await show_menu_parrainage(msg, uid, ctx.bot)
+
+        elif data == "menu_defis":
+            from gamification import show_mes_defis
+            await show_mes_defis(msg, uid)
+
+        elif data == "menu_litige":
+            from litiges import start_litige
+            await start_litige(msg, uid, ctx)
+
+        elif data == "menu_cgu":
+            from cgu import show_cgu
+            await show_cgu(msg)
+
+        elif data == "menu_recherche":
+            from recherche import show_menu_recherche
+            await show_menu_recherche(msg)
+
+        elif data == "retour_start":
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            await start(update, ctx)
+
+        elif data == "adm_market_panel":
+            await show_admin_panel(msg, uid, SUPER_ADMIN_ID)
+            
+    except Exception as error_boutons:
+        print(f"❌ Erreur critique lors du clic sur un bouton : {error_boutons}")
+        await query.edit_message_text(f"⚠️ Une erreur est survenue avec ce bouton : {error_boutons}")
 
 # ══════════════════════════════════════════════════════════════
 #  HANDLERS MESSAGES ET PHOTOS
