@@ -253,15 +253,16 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    print(f"DEBUG_CLIC: {query.data}")
-    print(f"DEBUG: Clic reçu avec data: {query.data}")
-    await query.answer()
-    msg = query.message
-    uid = query.from_user.id
+    await query.answer()  # Indique à Telegram que le clic a été reçu (enlève le sablier)
+    
+    # --- EXTRACTION DES VARIABLES ESSENTIELLES ---
     data = query.data
-
-    if await handle_cgu_callbacks(query, ctx, ctx.bot): return
-    if await handle_annonces_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
+    msg = query.message
+    uid = update.effective_user.id
+    
+    print(f"DEBUG_CLIC: {data}")  # Ton super outil de suivi dans Render
+    
+    # Redirection vers les modules externes si nécessaire
     if await handle_recherche_callbacks(query, ctx): return
     if await handle_transactions_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
     if await handle_litiges_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
@@ -271,53 +272,58 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if await handle_gamification_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
     if await handle_admin_market_callbacks(query, ctx, ctx.bot, SUPER_ADMIN_ID): return
 
-    # Callbacks restants
+    # --- CALLBACKS RESTANTS ---
     if data == "menu_vendre":
         from cgu import user_a_accepte_cgu_vendeur
         if not await user_a_accepte_cgu_vendeur(msg, uid, ctx): return
         await start_creation_annonce(msg, uid)
-
+        
     elif data == "menu_mes_annonces":
         await show_mes_annonces(msg, uid)
-
+        
     elif data == "menu_historique":
         from transactions import show_historique
         await show_historique(msg, uid)
-
+        
     elif data == "menu_leaderboard":
         await show_leaderboard(msg, "vendeurs")
-
+        
     elif data == "menu_blacklist_publique":
         from admin_market import show_blacklist_publique
         await show_blacklist_publique(msg)
-
+        
     elif data == "menu_alertes":
         from alertes import show_menu_alertes
         await show_menu_alertes(msg, uid)
-
+        
     elif data == "menu_parrainage":
         from parrainage import show_menu_parrainage
         await show_menu_parrainage(msg, uid, ctx.bot)
-
+        
     elif data == "menu_defis":
         from gamification import show_mes_defis
         await show_mes_defis(msg, uid)
-
+        
     elif data == "menu_litige":
         from litiges import start_litige
         await start_litige(msg, uid, ctx)
-
+        
     elif data == "menu_cgu":
         from cgu import show_cgu
         await show_cgu(msg)
-
+        
     elif data == "menu_recherche":
         from recherche import show_menu_recherche
         await show_menu_recherche(msg)
-
+        
     elif data == "retour_start":
+        # Pour éviter les doubles menus, on supprime l'ancien message avant de relancer start
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         await start(update, ctx)
-
+        
     elif data == "adm_market_panel":
         await show_admin_panel(msg, uid, SUPER_ADMIN_ID)
 
