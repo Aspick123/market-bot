@@ -31,7 +31,7 @@ from recherche import handle_recherche_callbacks, handle_recherche_input
 from transactions import handle_transactions_callbacks
 from litiges import handle_litiges_callbacks, handle_litiges_input, handle_litiges_photos
 from alertes import handle_alertes_callbacks
-from reputation import handle_reputation_callbacks, handle_reputation_input, show_leaderboard
+from reputation import handle_reputation_callbacks, handle_reputation_input
 from parrainage import handle_parrainage_callbacks
 from cgu import handle_cgu_callbacks, handle_cgu_input
 from gamification import handle_gamification_callbacks
