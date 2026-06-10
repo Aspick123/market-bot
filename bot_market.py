@@ -175,7 +175,7 @@ async def afficher_choix_paiement(reply_func, ctx):
     await reply_func(texte, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return CHOIX_PAIEMENT
 
-async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def prix_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte_prix = update.message.text.strip()
     
     # Sécurité pour vérifier que c'est bien un nombre entier
