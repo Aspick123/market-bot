@@ -86,89 +86,117 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------------- LOGIQUE DU MODULE VENTE ----------------
 
 async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Déclenchée quand l'utilisateur clique sur '➕ Vendre'."""
     query = update.callback_query
     await query.answer()
     
+    # Nettoyage des anciennes données de vente si elles existent
+    ctx.user_data.clear()
+    
     kb = [
-        [InlineKeyboardButton("🎮 Comptes de Jeu", callback_data="cat:Comptes")],
-        [InlineKeyboardButton("💰 Monnaies Virtuelles / Items", callback_data="cat:Monnaies")],
+        [InlineKeyboardButton("⚽ eFootball Mobile", callback_data="cat:efootball")],
+        [InlineKeyboardButton("✨ Genshin Impact", callback_data="cat:genshin")],
+        [InlineKeyboardButton("⭐ Brawl Stars", callback_data="cat:brawl_stars")],
         [InlineKeyboardButton("🔙 Annuler", callback_data="menu:retour_start")]
     ]
-    
     await query.message.edit_text(
-        "📁 **Étape 1 :** Choisissez la catégorie de votre produit :",
+        "📦 **Étape 1/3 : Choix de la catégorie**\n\nQuel type de compte de jeu souhaitez-vous mettre en vente ?",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
     return CHOIX_CATEGORIE
 
 async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Enregistre la catégorie et demande la description."""
     query = update.callback_query
     await query.answer()
     
-    ctx.user_data["v_categorie"] = query.data.replace("cat:", "")
+    # On extrait le nom propre du jeu
+    cat_mapping = {
+        "cat:efootball": "eFootball Mobile",
+        "cat:genshin": "Genshin Impact",
+        "cat:brawl_stars": "Brawl Stars"
+    }
+    choix = cat_mapping.get(query.data, "Autre")
+    ctx.user_data["vente_categorie"] = choix
     
     await query.message.edit_text(
-        "📝 **Étape 2 :** Entrez la description de votre produit.\n"
-        "*(Ex: Compte Genshin AR58, Raiden + Furina, Serveur EU)*.\n\n"
-        "✍️ _Écrivez votre texte directement dans le chat puis envoyez._"
+        f"📝 **Étape 2/3 : Description de l'offre ({choix})**\n\n"
+        "Veuillez envoyer un message contenant les détails de votre compte.\n"
+        "*(Ex: Personnages disponibles, niveau de compte, quantité de monnaie virtuelle, etc.)*",
+        parse_mode="Markdown"
     )
     return ATTENTE_DESCRIPTION
 
 async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Enregistre la description et demande le prix."""
-    ctx.user_data["v_description"] = update.message.text
+    ctx.user_data["vente_description"] = update.message.text
     
     await update.message.reply_text(
-        "💶 **Étape 3 :** Quel est le prix de votre article ?\n"
-        "*(Ex: 250 USDT, 15 000 FCFA)*"
+        "💰 **Étape 3/3 : Fixer le prix**\n\n"
+        "Entrez le prix de vente souhaité en **FCFA (XOF)**.\n"
+        "*(Entrez uniquement un nombre entier, sans texte ni symboles)*",
+        parse_mode="Markdown"
     )
     return ATTENTE_PRIX
 
 async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Enregistre le prix et demande la confirmation finale."""
-    ctx.user_data["v_prix"] = update.message.text
+    texte_prix = update.message.text.strip()
     
-    resume = (
-        "📊 **Récapitulatif de votre annonce :**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"📁 **Catégorie :** {ctx.user_data['v_categorie']}\n"
-        f"📝 **Description :** {ctx.user_data['v_description']}\n"
-        f"💰 **Prix demandé :** {ctx.user_data['v_prix']}\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "Souhaitez-vous publier cette annonce sur le marché ?"
+    # Sécurité pour vérifier que c'est bien un nombre entier
+    if not texte_prix.isdigit():
+        await update.message.reply_text("❌ Veuillez entrer un prix valide (uniquement des chiffres). Réessayez :")
+        return ATTENTE_PRIX
+        
+    ctx.user_data["vente_prix"] = int(texte_prix)
+    
+    # Préparation du récapitulatif
+    cat = ctx.user_data["vente_categorie"]
+    desc = ctx.user_data["vente_description"]
+    prix = ctx.user_data["vente_prix"]
+    
+    recap = (
+        "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        f"📦 **Jeu :** `{cat}`\n"
+        f"📝 **Description :**\n{desc}\n\n"
+        f"💰 **Prix demandé :** `{prix} XOF`\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        "Souhaitez-vous valider et publier cette annonce sur la plateforme ?"
     )
     
     kb = [
-        [InlineKeyboardButton("✅ Publier l'annonce", callback_data="publier:oui")],
-        [InlineKeyboardButton("❌ Annuler et tout effacer", callback_data="menu:retour_start")]
+        [InlineKeyboardButton("✅ Valider et Publier", callback_data="publier:oui")],
+        [InlineKeyboardButton("❌ Tout annuler", callback_data="publier:non")]
     ]
-    
-    await update.message.reply_text(resume, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text(recap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return CONFIRMATION
 
 async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Enregistre définitivement l'annonce dans MongoDB."""
     query = update.callback_query
     await query.answer()
-    uid = update.effective_user.id
+    uid = query.from_user.id
     
     if query.data == "publier:oui":
-        id_annonce = create_annonce(
-            vendeur_id=uid,
-            categorie=ctx.user_data["v_categorie"],
-            description=ctx.user_data["v_description"],
-            prix=ctx.user_data["v_prix"]
-        )
+        cat = ctx.user_data.get("vente_categorie")
+        desc = ctx.user_data.get("vente_description")
+        prix = ctx.user_data.get("vente_prix")
         
-        await query.message.edit_text(
-            f"🎉 **Félicitations !** Votre annonce a été publiée avec succès.\n"
-            f"🆔 **Référence de l'annonce :** `{id_annonce}`",
-            reply_markup=get_back_to_start_keyboard(),
-            parse_mode="Markdown"
+        # Import de votre fonction visible sur la ligne 70 du fichier database_market
+        from database_market import create_annonce
+        
+        # Enregistrement réel dans MongoDB
+        annonce_id = create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
+        
+        texte_succes = (
+            f"🎉 **Félicitations ! Annonce publiée !**\n\n"
+            f"🆔 ID unique de l'annonce : `{annonce_id}`\n"
+            "Votre compte est désormais enregistré et visible par les acheteurs potentiels."
         )
-    ctx.user_data.clear()
+        ctx.user_data.clear()
+        await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        
+    else:
+        ctx.user_data.clear()
+        await query.message.edit_text("❌ Création de l'annonce annulée avec succès.", reply_markup=get_back_to_start_keyboard())
+        
     return ConversationHandler.END
 
 # ---------------- FIN DU MODULE VENTE ----------------
