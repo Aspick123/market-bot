@@ -174,6 +174,7 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------------- FIN DU MODULE VENTE ----------------
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    from database_market import is_mode_urgence, db
     query = update.callback_query
     uid = update.effective_user.id
     data = query.data
@@ -217,10 +218,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if uid != SUPER_ADMIN_ID:
                 await query.message.edit_text("⛔ Accès refusé. Vous n'êtes pas administrateur.", reply_markup=get_back_to_start_keyboard())
                 return
-
-            # Import dynamique ou appel direct de tes fonctions de database_market
-            from database_market import db, is_mode_urgence
-            
+                
             # Récupération des statistiques réelles dans MongoDB
             total_users = db.users.count_documents({}) if hasattr(db, 'users') else 0
             total_annonces = db.annonces.count_documents({}) if hasattr(db, 'annonces') else 0
