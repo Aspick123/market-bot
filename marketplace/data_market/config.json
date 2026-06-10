@@ -1,0 +1,13 @@
+{
+  "max_annonces_par_user": 3,
+  "duree_annonce_jours": 30,
+  "boost_duree_jours": 7,
+  "delai_anti_arnaque_minutes": 5,
+  "signalements_avant_suspension": 3,
+  "canal_id": "",
+  "anciennete_vendeur_jours": 0,
+  "rapport_hebdo_jour": "lundi",
+  "rapport_mensuel_jour": 1,
+  "version_cgu": "1.0",
+  "recrutement_ouvert": true
+}

@@ -1,0 +1,186 @@
+{
+  "Fortnite": {
+    "monnaies": [
+      "V-Bucks"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "FIFA 24": {
+    "monnaies": [
+      "FIFA Points",
+      "FIFA Coins"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "FC 25": {
+    "monnaies": [
+      "FC Points",
+      "FC Coins"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Call of Duty": {
+    "monnaies": [
+      "COD Points",
+      "CP"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "PUBG Mobile": {
+    "monnaies": [
+      "UC"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Free Fire": {
+    "monnaies": [
+      "Diamants"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Clash of Clans": {
+    "monnaies": [
+      "Gemmes"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Clash Royale": {
+    "monnaies": [
+      "Gemmes"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Brawl Stars": {
+    "monnaies": [
+      "Gemmes"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Mobile Legends": {
+    "monnaies": [
+      "Diamants"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Genshin Impact": {
+    "monnaies": [
+      "Primogyems",
+      "Genesis Crystals"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Valorant": {
+    "monnaies": [
+      "VP"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "League of Legends": {
+    "monnaies": [
+      "RP",
+      "Blue Essence"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Minecraft": {
+    "monnaies": [
+      "Minecoins"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Roblox": {
+    "monnaies": [
+      "Robux"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Steam": {
+    "monnaies": [
+      "Steam Wallet"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "PlayStation": {
+    "monnaies": [
+      "PSN Credits"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Xbox": {
+    "monnaies": [
+      "Microsoft Points"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  },
+  "Supercell ID": {
+    "monnaies": [
+      "Gemmes"
+    ],
+    "type": [
+      "compte"
+    ]
+  },
+  "Autre": {
+    "monnaies": [
+      "Autre"
+    ],
+    "type": [
+      "compte",
+      "monnaie"
+    ]
+  }
+}

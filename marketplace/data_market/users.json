@@ -1,0 +1,50 @@
+{
+  "5117004360": {
+    "id": 5117004360,
+    "joined": "09/06/2026",
+    "role": "membre",
+    "est_vendeur": false,
+    "vendeur_verifie": false,
+    "profil": {
+      "photo_id": null,
+      "nom": "",
+      "bio": "",
+      "nationalite": "",
+      "telephone": "",
+      "telephone_public": false,
+      "whatsapp": "",
+      "instagram": "",
+      "autres_reseaux": "",
+      "monnaies_acceptees": [],
+      "methodes_paiement": [],
+      "statut": "hors_ligne",
+      "heure_debut": "",
+      "heure_fin": ""
+    },
+    "stats": {
+      "annonces_publiees": 0,
+      "ventes": 0,
+      "achats": 0,
+      "echanges": 0,
+      "litiges_ouverts": 0,
+      "litiges_resolus": 0,
+      "signalements_recus": 0,
+      "vues_total": 0,
+      "contacts_recus": 0
+    },
+    "cgu_acceptee": true,
+    "cgu_version_acceptee": "1.0",
+    "cgu_date_acceptation": "09/06/2026 06:28",
+    "parrain_id": null,
+    "filleuls": [],
+    "points": 0,
+    "niveau": "bronze",
+    "badges": [],
+    "abonne_alertes": [],
+    "blackliste": false,
+    "avertissements": 0,
+    "suspendu": false,
+    "rapport_hebdo": true,
+    "rapport_mensuel": true
+  }
+}
