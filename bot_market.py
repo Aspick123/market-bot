@@ -371,7 +371,7 @@ def main():
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app_tg.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     print("🚀 Bot Marketplace démarré !")
-    app_tg.run_polling(allowed_updates=Update.ALL_TYPES
+    app_tg.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
