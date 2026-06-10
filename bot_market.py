@@ -350,10 +350,12 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════
 
 def main():
-        app_tg = ApplicationBuilder().token(TOKEN).build()
+    app_tg = ApplicationBuilder().token(TOKEN).build()
+    
+    # --- COMMANDES CORRIGÉES ---
     app_tg.add_handler(CommandHandler("start", start))
-    app_tg.add_handler(CommandHandler("aide", start))  # Renvoie vers le menu d'aide/start
-    app_tg.add_handler(CommandHandler("vendre", start)) 
+    app_tg.add_handler(CommandHandler("aide", start))
+    app_tg.add_handler(CommandHandler("vendre", start))
     app_tg.add_handler(CommandHandler("annonces", start))
     app_tg.add_handler(CommandHandler("profil", start))
     app_tg.add_handler(CommandHandler("mes_annonces", start))
@@ -365,9 +367,12 @@ def main():
     app_tg.add_handler(CommandHandler("defis", start))
     app_tg.add_handler(CommandHandler("cgu", start))
     app_tg.add_handler(CommandHandler("admin", start))
+    
+    # --- GESTIONNAIRES DE CALLBACKS ET MESSAGES ---
     app_tg.add_handler(CallbackQueryHandler(button_handler))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app_tg.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
     print("🚀 Bot Marketplace démarré !")
     app_tg.run_polling(allowed_updates=Update.ALL_TYPES)
 
