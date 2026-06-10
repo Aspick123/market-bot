@@ -44,7 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEf5EcX6TzgGsaT8KZWRiAEK42h4FJjc0k")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAFxtyQig1cNZDvYF1PnTTbOlDOW1POlrx4")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "511704360"))
 
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
