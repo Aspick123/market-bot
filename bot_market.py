@@ -213,9 +213,56 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
             
+                elif data == "menu:admin_panel":
+            if uid != SUPER_ADMIN_ID:
+                await query.message.edit_text("⛔ Accès refusé. Vous n'êtes pas administrateur.", reply_markup=get_back_to_start_keyboard())
+                return
+
+            # Import dynamique ou appel direct de tes fonctions de database_market
+            from database_market import db, is_mode_urgence
+            
+            # Récupération des statistiques réelles dans MongoDB
+            total_users = db.users.count_documents({}) if hasattr(db, 'users') else 0
+            total_annonces = db.annonces.count_documents({}) if hasattr(db, 'annonces') else 0
+            statut_urgence = "🚨 ACTIF (Maintenance)" if is_mode_urgence() else "✅ INACTIF (En ligne)"
+
+            admin_text = (
+                "⚡ **PANNEAU D'ADMINISTRATION** ⚡\n"
+                "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+                f"📊 **Statistiques du Marketplace :**\n"
+                f"👤 Utilisateurs inscrits : `{total_users}`\n"
+                f"📦 Annonces créées : `{total_annonces}`\n\n"
+                f"⚙️ **Statut du Bot :** {statut_urgence}\n"
+                "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                "Utilisez les boutons ci-dessous pour piloter la plateforme :"
+            )
+
+            # Boutons de contrôle
+            kb = [
+                [InlineKeyboardButton("🚨 Basculer Mode Urgence", callback_data="admin:toggle_urgence")],
+                [InlineKeyboardButton("🔙 Retour au Menu", callback_data="menu:retour_start")]
+            ]
+            await query.message.edit_text(admin_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+        elif data == "admin:toggle_urgence":
+            if uid != SUPER_ADMIN_ID: return
+            
+            from database_market import db
+            # On cherche ou crée la config du mode urgence
+            config = db.config.find_one({"_id": "mode_urgence"})
+            actuel = config.get("actif", False) if config else False
+            nouveau_statut = not actuel
+            
+            db.config.update_one({"_id": "mode_urgence"}, {"$set": {"actif": nouveau_statut}}, upsert=True)
+            
+            texte_confirmation = f"🚨 **Mode Urgence modifié !**\nLe mode maintenance est maintenant : {'🔴 ACTIF' if nouveau_statut else '🟢 INACTIF'}."
+            kb = [[InlineKeyboardButton("🔄 Rafraîchir le Panel", callback_data="menu:admin_panel")]]
+            await query.message.edit_text(texte_confirmation, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+        # Reste des modules en chantier (sans admin_panel)
         elif data in ["menu:recherche", "menu:mes_annonces", "menu:historique", 
                       "menu:parrainage", "menu:defis", "menu:leaderboard", "menu:litige", 
-                      "menu:alertes", "menu:blacklist", "menu:admin_panel"]:
+                      "menu:alertes", "menu:blacklist"]:
             feature_name = data.replace("menu:", "").replace("_", " ").title()
             await query.message.edit_text(
                 f"🚧 **Module [{feature_name}]**\n\nCe module est propre et prêt à recevoir sa logique métier.",
