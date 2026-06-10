@@ -91,12 +91,11 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     ctx.user_data.clear()
-    
     kb = [
         [InlineKeyboardButton("⚽ eFootball Mobile", callback_data="cat:efootball")],
         [InlineKeyboardButton("✨ Genshin Impact", callback_data="cat:genshin")],
         [InlineKeyboardButton("⭐ Brawl Stars", callback_data="cat:brawl_stars")],
-        [InlineKeyboardButton("➕ Autre Jeu", callback_data="cat:autre")], # <-- Nouveau bouton
+        [InlineKeyboardButton("➕ Autre Jeu", callback_data="cat:autre")],
         [InlineKeyboardButton("🔙 Annuler", callback_data="menu:retour_start")]
     ]
     await query.message.edit_text(
@@ -109,132 +108,85 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "cat:autre":
         await query.message.edit_text(
-            "🎮 **Quel est le nom de votre jeu ?**\n\nVeuillez écrire et envoyer le nom exact du jeu concerné par votre compte.",
+            "🎮 **Quel est le nom de votre jeu ?**\n\nVeuillez écrire et envoyer le nom exact du jeu concerné.",
             parse_mode="Markdown"
         )
-        return ATTENTE_AUTRE_JEU # <-- Nouvel état à gérer dans le ConversationHandler
-        
+        return ATTENTE_AUTRE_JEU
     cat_mapping = {
         "cat:efootball": "eFootball Mobile",
         "cat:genshin": "Genshin Impact",
         "cat:brawl_stars": "Brawl Stars"
     }
     ctx.user_data["vente_categorie"] = cat_mapping.get(query.data, "Inconnu")
-    
     await query.message.edit_text(
         f"📝 **Étape 2 : Description de l'offre ({ctx.user_data['vente_categorie']})**\n\nVeuillez envoyer les détails de votre compte.",
         parse_mode="Markdown"
     )
     return ATTENTE_DESCRIPTION
 
-# La nouvelle fonction intermédiaire si l'utilisateur écrit son jeu :
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_categorie"] = update.message.text.strip()
-    
     await update.message.reply_text(
-        f"📝 **Étape 2 : Description de l'offre ({ctx.user_data['vente_categorie']})**\n\nVeuillez envoyer les détails de votre compte.",
+        f"📝 **Étape 2 : Description de l'offre ({ctx.user_data['vente_categorie']})**\n\nVeuillez envoyer un message contenant les détails de votre compte.",
         parse_mode="Markdown"
     )
     return ATTENTE_DESCRIPTION
 
-# Modifie prix_recu pour amener vers le choix du paiement
+async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["vente_description"] = update.message.text
+    await update.message.reply_text(
+        "💰 **Étape 3 : Fixer le prix**\n\nEntrez le prix de vente souhaité en **FCFA (XOF)**.\n*(Entrez uniquement un nombre entier)*",
+        parse_mode="Markdown"
+    )
+    return ATTENTE_PRIX
+
 async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte_prix = update.message.text.strip()
     if not texte_prix.isdigit():
         await update.message.reply_text("❌ Veuillez entrer un prix valide (uniquement des chiffres) :")
         return ATTENTE_PRIX
-        
     ctx.user_data["vente_prix"] = int(texte_prix)
-    ctx.user_data["vente_paiements"] = [] # Liste pour stocker les choix multiples
-
+    ctx.user_data["vente_paiements"] = []
     return await afficher_choix_paiement(update.message.reply_text, ctx)
 
-# Fonction pour afficher le menu des paiements (avec système de cases à cocher)
 async def afficher_choix_paiement(reply_func, ctx):
     choix = ctx.user_data.get("vente_paiements", [])
-    
-    # Émoticônes dynamiques pour simuler des cases à cocher ☑️ / ⬜
     check = lambda m: "☑️" if m in choix else "⬜"
-    
     kb = [
         [InlineKeyboardButton(f"{check('CFA')} 💵 FCFA (Airtel / Moov / Wave)", callback_data="pay:CFA")],
         [InlineKeyboardButton(f"{check('USDT')} 🪙 USDT (Binance TRC20)", callback_data="pay:USDT")],
         [InlineKeyboardButton("✅ Confirmer la sélection", callback_data="pay:valider")]
     ]
-    
-    texte = (
-        "💳 **Étape 4 : Moyens de paiement acceptés**\n\n"
-        "Sélectionnez la ou les méthodes de paiement que vous acceptez pour cette vente.\n"
-        "*(Cliquez sur les boutons pour cocher/décocher, puis validez)*"
+    await reply_func(
+        "💳 **Étape 4 : Moyens de paiement acceptés**\n\nSélectionnez la ou les méthodes que vous acceptez.\n*(Cochez/décochez, puis validez)*",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
     )
-    
-    # Fonction flexible pour gérer l'envoi initial ou l'édition
-    await reply_func(texte, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return CHOIX_PAIEMENT
 
-async def prix_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    texte_prix = update.message.text.strip()
-    
-    # Sécurité pour vérifier que c'est bien un nombre entier
-    if not texte_prix.isdigit():
-        await update.message.reply_text("❌ Veuillez entrer un prix valide (uniquement des chiffres). Réessayez :")
-        return ATTENTE_PRIX
-        
-    ctx.user_data["vente_prix"] = int(texte_prix)
-    
-    # Préparation du récapitulatif
-    cat = ctx.user_data["vente_categorie"]
-    desc = ctx.user_data["vente_description"]
-    prix = ctx.user_data["vente_prix"]
-    
-    recap = (
-        "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-        f"📦 **Jeu :** `{cat}`\n"
-        f"📝 **Description :**\n{desc}\n\n"
-        f"💰 **Prix demandé :** `{prix} XOF`\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-        "Souhaitez-vous valider et publier cette annonce sur la plateforme ?"
-    )
-    
-    kb = [
-        [InlineKeyboardButton("✅ Valider et Publier", callback_data="publier:oui")],
-        [InlineKeyboardButton("❌ Tout annuler", callback_data="publier:non")]
-    ]
-    await update.message.reply_text(recap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    return CONFIRMATION
 async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    
     choix = ctx.user_data.get("vente_paiements", [])
-    
     if data == "pay:valider":
         if not choix:
-            # Sécurité si rien n'est coché
             kb = [[InlineKeyboardButton("🔄 Réessayer", callback_data="pay:refresh")]]
             await query.message.edit_text("⚠️ Vous devez sélectionner au moins un moyen de paiement.", reply_markup=InlineKeyboardMarkup(kb))
             return CHOIX_PAIEMENT
-            
-        # Si c'est bon, on passe au récapitulatif final !
         cat = ctx.user_data["vente_categorie"]
         desc = ctx.user_data["vente_description"]
         prix = ctx.user_data["vente_prix"]
         methodes = ", ".join(choix)
-        
         recap = (
-            "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n"
-            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            "🧐 **VÉRIFICATION DE VOTRE ANNONCE**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             f"📦 **Jeu :** `{cat}`\n"
             f"📝 **Description :**\n{desc}\n\n"
             f"💰 **Prix demandé :** `{prix} XOF`\n"
-            f"💳 **Paiements acceptés :** `{methodes}`\n"
-            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-            "Souhaitez-vous valider et publier cette annonce sur la plateforme ?"
+            f"💳 **Paiements :** `{methodes}`\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            "Souhaitez-vous valider et publier cette annonce ?"
         )
         kb = [
             [InlineKeyboardButton("✅ Valider et Publier", callback_data="publier:oui")],
@@ -242,17 +194,12 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         ]
         await query.message.edit_text(recap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return CONFIRMATION
-
-    # Logique de coche / décoche
-    methode_cliquee = data.replace("pay:", "")
-    if methode_cliquee in choix:
-        choix.remove(methode_cliquee)
+    methode = data.replace("pay:", "")
+    if methode in choix:
+        choix.remove(methode)
     else:
-        choix.append(methode_cliquee)
-        
+        choix.append(methode)
     ctx.user_data["vente_paiements"] = choix
-    
-    # On reconstruit le clavier mis à jour en éditant le texte
     check = lambda m: "☑️" if m in choix else "⬜"
     kb = [
         [InlineKeyboardButton(f"{check('CFA')} 💵 FCFA (Airtel / Moov / Wave)", callback_data="pay:CFA")],
@@ -266,32 +213,19 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    
     if query.data == "publier:oui":
         cat = ctx.user_data.get("vente_categorie")
         desc = ctx.user_data.get("vente_description")
         prix = ctx.user_data.get("vente_prix")
-        
-        # Import de votre fonction visible sur la ligne 70 du fichier database_market
         from database_market import create_annonce
-        
-        # Enregistrement réel dans MongoDB
         annonce_id = create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
-        
-        texte_succes = (
-            f"🎉 **Félicitations ! Annonce publiée !**\n\n"
-            f"🆔 ID unique de l'annonce : `{annonce_id}`\n"
-            "Votre compte est désormais enregistré et visible par les acheteurs potentiels."
-        )
+        texte_succes = f"🎉 **Félicitations ! Annonce publiée !**\n\n🆔 ID unique : `{annonce_id}`\nVotre compte est bien enregistré."
         ctx.user_data.clear()
         await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
-        
     else:
         ctx.user_data.clear()
-        await query.message.edit_text("❌ Création de l'annonce annulée avec succès.", reply_markup=get_back_to_start_keyboard())
-        
+        await query.message.edit_text("❌ Création de l'annonce annulée.", reply_markup=get_back_to_start_keyboard())
     return ConversationHandler.END
-
 # ---------------- FIN DU MODULE VENTE ----------------
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
