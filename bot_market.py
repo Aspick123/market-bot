@@ -160,15 +160,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     reply_markup = InlineKeyboardMarkup(kb)
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-    if update.callback_query:
-        await update.callback_query.message.edit_text(
-            welcome_text, reply_markup=reply_markup, parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            welcome_text, reply_markup=reply_markup, parse_mode="Markdown"
-        )
 
 # ══════════════════════════════════════════════════════════════
 #  COMMANDES
