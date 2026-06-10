@@ -213,7 +213,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
             
-                elif data == "menu:admin_panel":
+        elif data == "menu:admin_panel":
             if uid != SUPER_ADMIN_ID:
                 await query.message.edit_text("⛔ Accès refusé. Vous n'êtes pas administrateur.", reply_markup=get_back_to_start_keyboard())
                 return
