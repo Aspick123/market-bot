@@ -497,7 +497,7 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ATTENTE_PHOTOS
         
-def main():
+# Mettre la fonction complètement en dehors de main() (alignée tout à gauche)
 async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -508,29 +508,40 @@ async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     
     # On passe enfin à l'affichage des cases à cocher
     return await afficher_choix_specificites(query.message.edit_text, ctx)
-    
+
+
+def main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
     application = ApplicationBuilder().token(TOKEN).build()
     
     vente_conv = ConversationHandler(
-                entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
+        entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
-            # 1. Quand l'utilisateur a écrit le nom du jeu, on l'envoie vers autre_jeu_recu
+            # 1. Enregistrement du nom du jeu tapé
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
             
-            # 2. Cet état intercepte le clic sur le bouton de la plateforme
+            # 2. Enregistrement de la plateforme choisie
             CHOIX_PLATEFORME: [CallbackQueryHandler(plateforme_choisie_handler, pattern="^plat:")],
             
-            # 3. Cet état gère les cases à cocher (caractéristiques)
+            # 3. Menu des cases à cocher
             CHOIX_SPECIFICITES: [CallbackQueryHandler(specificite_choisie_handler, pattern="^spec:")],
             
-            # 4. Cet état récupère les nombres envoyés pour chaque caractéristique
+            # 4. Enregistrement des quantités numériques
             ATTENTE_VALEURS_SPECS: [MessageHandler(filters.TEXT & ~filters.COMMAND, valeurs_specs_recues)],
-
-    },
-
+            
+            # --- Suite et fin logique du tunnel de vente ---
+            ATTENTE_PHOTOS: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), photos_recues)],
+            ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
+            CHOIX_DEVISE: [CallbackQueryHandler(devise_choisie_handler, pattern="^devise:")],
+            ATTENTE_AUTRE_DEVISE: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_devise_recue)],
+            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
+            CHOIX_CRYPTO: [CallbackQueryHandler(crypto_choisie_handler, pattern="^crypto:")],
+            ATTENTE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_recu)],
+            ATTENTE_DISPO: [MessageHandler(filters.TEXT & ~filters.COMMAND, dispo_recue)],
+            CONFIRMATION: [CallbackQueryHandler(confirmation_handler, pattern="^(publier:|annuler$)")]
+        },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
     )
