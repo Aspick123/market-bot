@@ -25,7 +25,7 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
-# États de la conversation pour la création d'une annonce (Tunnel Avancé)
+# États de la conversation pour la création d'une annonce (Tunnel Avancé - Strict)
 (
     CHOIX_CATEGORIE,
     ATTENTE_AUTRE_JEU,
@@ -37,13 +37,12 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
     CHOIX_DEVISE,
     ATTENTE_AUTRE_DEVISE,
     ATTENTE_PRIX,
+    CHOIX_PAIEMENT,         # Placé correctement au bon endroit
     CHOIX_CRYPTO,
     ATTENTE_CONTACT,
     ATTENTE_DISPO,
     CONFIRMATION
-) = range(14)
-
-CHOIX_PAIEMENT = 99  # État temporaire pour la gestion des paiements
+) = range(15)              # Augmenté à 15 états réels
 
 app = Flask("")
 
@@ -158,7 +157,6 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return ATTENTE_PRIX
             
         ctx.user_data["vente_prix"] = int(texte_prix)
-        
         return await afficher_choix_paiement(update.message.reply_text, ctx)
 
 async def afficher_choix_paiement(reply_func, ctx):
@@ -245,12 +243,11 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         desc = ctx.user_data.get("vente_description", "Aucune description")
         prix = ctx.user_data.get("vente_prix", 0)
         
-        # Enregistrement en base de données
         create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
         
         texte_succes = (
             "🎉 **Félicitations ! Votre annonce a été publiée avec succès.**\n\n"
-            "Elle est désormais visible sur le Marketplace. Vous recevrez une notification directe si un acheteur est intéressé."
+            "Elle est désormais en ligne. Vous recevrez une notification directe si un utilisateur est intéressé."
         )
         await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     
@@ -328,14 +325,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                       "menu:alertes", "menu:blacklist"]:
             feature_name = data.replace("menu:", "").replace("_", " ").title()
             await query.message.edit_text(
-                f"🚧 **Module [{feature_name}]**\n\nCe module est propre et prêt à recevoir sa logique métier.",
+                f"🚧 **Module [{feature_name}]**\n\nCe module est prêt à recevoir sa logique métier.",
                 reply_markup=get_back_to_start_keyboard(),
                 parse_mode="Markdown"
             )
 
     except Exception as e:
         logger.error(f"Erreur callback {data}: {str(e)}")
-        await query.message.reply_text(f"❌ Erreur : {str(e)}")
 
 # ---------------- ETAPES DU TUNNEL AVANCE ----------------
 
@@ -427,7 +423,7 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
 async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte = update.message.text.strip()
     
-    if not text.isdigit():
+    if not texte.isdigit():
         await update.message.reply_text("❌ Veuillez entrer un nombre valide (uniquement des chiffres) :")
         return ATTENTE_VALEURS_SPECS
         
@@ -469,7 +465,7 @@ async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     
     return await afficher_choix_specificites(query.message.edit_text, ctx)
 
-# ---------------- FONCTIONS DE TRANSITION OBLIGATOIRES POUR LE CONVERSATIONHANDLER ----------------
+# ---------------- TRANSITIONS OBLIGATOIRES ----------------
 
 async def photos_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
@@ -532,16 +528,17 @@ def main():
                 CallbackQueryHandler(prix_recu, pattern="^devise:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)
             ],
+            CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
             CHOIX_CRYPTO: [CallbackQueryHandler(crypto_choisie_handler, pattern="^crypto:")],
             ATTENTE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_recu)],
             ATTENTE_DISPO: [MessageHandler(filters.TEXT & ~filters.COMMAND, dispo_recue)],
-            CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")],
-            CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")]
+            CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")]
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
     )
     
+    # TRÈS IMPORTANT : Le tunnel doit être ajouté AVANT le button_handler général
     application.add_handler(vente_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
