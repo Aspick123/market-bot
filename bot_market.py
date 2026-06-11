@@ -29,6 +29,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 (
     CHOIX_CATEGORIE,
     ATTENTE_AUTRE_JEU,
+    CHOIX_PLATEFORME,      # Elle doit être présente ici
     CHOIX_SPECIFICITES,
     ATTENTE_VALEURS_SPECS,
     ATTENTE_PHOTOS,
@@ -40,7 +41,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
     ATTENTE_CONTACT,
     ATTENTE_DISPO,
     CONFIRMATION
-) = range(13)
+) = range(14)              # On l'augmente à 14
 
 app = Flask("")
 
@@ -497,20 +498,35 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ATTENTE_PHOTOS
         
 def main():
+async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # On récupère la plateforme sélectionnée
+    plateforme = query.data.replace("plat:", "")
+    ctx.user_data["vente_plateforme"] = plateforme
+    
+    # On passe enfin à l'affichage des cases à cocher
+    return await afficher_choix_specificites(query.message.edit_text, ctx)
+    
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
     application = ApplicationBuilder().token(TOKEN).build()
     
     vente_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
-                            states={
-            # Désormais, CHOIX_CATEGORIE intercepte le clic sur la plateforme :
-            CHOIX_CATEGORIE: [CallbackQueryHandler(plateforme_choisie_handler, pattern="^plat:")],
-            
+                entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
+        states={
+            # 1. Quand l'utilisateur a écrit le nom du jeu, on l'envoie vers autre_jeu_recu
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
             
+            # 2. Cet état intercepte le clic sur le bouton de la plateforme
+            CHOIX_PLATEFORME: [CallbackQueryHandler(plateforme_choisie_handler, pattern="^plat:")],
+            
+            # 3. Cet état gère les cases à cocher (caractéristiques)
             CHOIX_SPECIFICITES: [CallbackQueryHandler(specificite_choisie_handler, pattern="^spec:")],
+            
+            # 4. Cet état récupère les nombres envoyés pour chaque caractéristique
             ATTENTE_VALEURS_SPECS: [MessageHandler(filters.TEXT & ~filters.COMMAND, valeurs_specs_recues)],
 
     },
