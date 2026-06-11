@@ -340,7 +340,6 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == "publier:oui":
-        # Envoi automatique vers la modération
         await soumettre_a_la_moderation(update, ctx)
     elif query.data == "publier:non":
         await query.message.edit_text("❌ **Création de l'annonce annulée.**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
@@ -355,7 +354,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
     uid = update.effective_user.id
 
-    # Interceptions des modules externes
     if data.startswith("mod:"):
         await traitement_moderation(update, ctx)
         return
@@ -455,9 +453,9 @@ def main():
         allow_reentry=True
     )
     
-    # 2. Conversation de la Recherche Flash (Oui/Non)
+    # 2. Conversation de la Recherche Flash (Oui/Non) - Regex élargie pour attraper tous les clics
     recherche_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(debut_recherche, pattern="^menu:recherche$")],
+        entry_points=[CallbackQueryHandler(debut_recherche, pattern=".*recherche.*")],
         states={
             ATTENTE_RECHERCHE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_recherche)]
         },
@@ -470,7 +468,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot connecté de bout en bout avec Recherche Flash intégrée !")
+    logger.info("🚀 Bot connecté de bout en bout avec Recherche Flash validée !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
