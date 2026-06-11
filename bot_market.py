@@ -370,18 +370,19 @@ async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🌐 Multiplateforme (Partout)", callback_data="plat:Multi")]
     ]
     
-    await update.message.reply_text(
-        "🔌 **Sur quelle plateforme se trouve votre compte ?**\n\n"
+        await update.message.reply_text(
+        "🎮 **Sur quelle plateforme se trouve votre compte ?**\n\n"
         "Sélectionnez le support principal de votre compte :",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
+
     # On redirige vers notre nouvel état intermédiaire
     return CHOIX_PLATEFORME
-    ]
+
+kb = []
+for nom, callback in specs_disponibles:
     
-    kb = []
-    for nom, callback in specs_disponibles:
         id_spec = callback.replace("spec:", "")
         # Si la caractéristique est déjà cochée, on met un carré plein, sinon un carré vide
         check = "☑️" if id_spec in choix else "⬜"
