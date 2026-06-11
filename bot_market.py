@@ -387,6 +387,113 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"❌ Erreur : {str(e)}")
 
 def main():
+async def afficher_choix_specificites(reply_func, ctx):
+    choix = ctx.user_data.get("specs_choisies", [])
+    
+    # Liste des caractéristiques disponibles
+    specs_disponibles = [
+        ("👤 Personnages", "spec:Persos"),
+        ("👕 Skins", "spec:Skins"),
+        ("⚔️ Armes", "spec:Armes"),
+        ("🔮 Artefacts", "spec:Artefacts"),
+        ("💎 Objets Rares", "spec:Objets")
+    ]
+    
+    kb = []
+    for nom, callback in specs_disponibles:
+        id_spec = callback.replace("spec:", "")
+        # Si la caractéristique est déjà cochée, on met un carré plein, sinon un carré vide
+        check = "☑️" if id_spec in choix else "⬜"
+        kb.append([InlineKeyboardButton(f"{check} {nom}", callback_data=callback)])
+        
+    # Bouton de validation final
+    kb.append([InlineKeyboardButton("✅ Valider la sélection", callback_data="spec:valider")])
+    
+    await reply_func(
+        "📊 **Étape 2 : Spécificités du compte**\n\n"
+        "Qu'est-ce qu'on collectionne principalement dans votre jeu ?\n"
+        "*(Cochez ou décochez les options, puis cliquez sur Valider)*",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return CHOIX_SPECIFICITES
+
+async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    choix = ctx.user_data.get("specs_choisies", [])
+    
+    # Si l'utilisateur clique sur Valider
+    if data == "spec:valider":
+        if not choix:
+            # Si rien n'est coché, on passe directement à l'envoi des photos
+            await query.message.edit_text(
+                "📸 **Étape 3 : Preuves en images**\n\n"
+                "Veuillez envoyer entre **1 et 5 photos** de votre compte (captures d'écran).\n\n"
+                "👉 *Une fois que vous avez fini d'envoyer vos photos, écrivez le mot* **'FIN'** *pour passer à la suite.*",
+                parse_mode="Markdown"
+            )
+            return ATTENTE_PHOTOS
+            
+        # Sinon, on commence à lui demander les nombres pour la première case cochée
+        ctx.user_data["index_spec_actuelle"] = 0
+        premiere_spec = choix[0]
+        
+        await query.message.edit_text(
+            f"🔢 **Configuration des quantités**\n\n"
+            f"Combien de **{premiere_spec}** possédés exacts possédez-vous sur votre compte ?\n"
+            f"*(Entrez un nombre entier uniquement)*",
+            parse_mode="Markdown"
+        )
+        return ATTENTE_VALEURS_SPECS
+
+    # Gestion de la coche / décoche
+    id_spec = data.replace("spec:", "")
+    if id_spec in choix:
+        choix.remove(id_spec)
+    else:
+        choix.append(id_spec)
+        
+    ctx.user_data["specs_choisies"] = choix
+    return await afficher_choix_specificites(query.message.edit_reply_markup, ctx)
+async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    texte = update.message.text.strip()
+    
+    if not texte.isdigit():
+        await update.message.reply_text("❌ Veuillez entrer un nombre valide (uniquement des chiffres) :")
+        return ATTENTE_VALEURS_SPECS
+        
+    choix = ctx.user_data.get("specs_choisies", [])
+    index = ctx.user_data.get("index_spec_actuelle", 0)
+    
+    # Enregistrement de la valeur pour la spec actuelle
+    spec_actuelle = choix[index]
+    ctx.user_data["specs_valeurs"][spec_actuelle] = int(texte)
+    
+    # Passage à la caractéristique suivante s'il y en a une
+    index += 1
+    ctx.user_data["index_spec_actuelle"] = index
+    
+    if index < len(choix):
+        prochaine_spec = choix[index]
+        await update.message.reply_text(
+            f"🔢 **Prochaine quantité**\n\n"
+            f"Combien de **{prochaine_spec}** possédés possédez-vous exacts ?",
+            parse_mode="Markdown"
+        )
+        return ATTENTE_VALEURS_SPECS
+    else:
+        # Si toutes les quantités sont remplies, on passe aux photos !
+        await update.message.reply_text(
+            "📸 **Étape 3 : Preuves en images**\n\n"
+            "Veuillez envoyer entre **1 et 5 photos** de votre compte (captures d'écran).\n\n"
+            "👉 *Une fois que vous avez fini d'envoyer vos photos, écrivez le mot* **'FIN'** *pour passer à la suite.*",
+            parse_mode="Markdown"
+        )
+        return ATTENTE_PHOTOS
+    
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
@@ -394,19 +501,18 @@ def main():
     
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
-            states={
-        CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
-        
-        # ➕ Étape insérée si l'utilisateur écrit lui-même son jeu
-        ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
-        
-        ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
-        ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
-        
-        # ➕ Nouvelle étape insérée pour le choix multiple des paiements
-        CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
-        
-        CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")]
+                    states={
+            CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
+            
+            ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
+            
+            # 🔥 INSERE LES DEUX LIGNES ICI (PARFAITEMENT ALIGNÉES) :
+            CHOIX_SPECIFICITES: [CallbackQueryHandler(specificite_choisie_handler, pattern="^spec:")],
+            ATTENTE_VALEURS_SPECS: [MessageHandler(filters.TEXT & ~filters.COMMAND, valeurs_specs_recues)],
+            
+            ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
+            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
+
     },
 
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
