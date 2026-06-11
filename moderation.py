@@ -13,13 +13,13 @@ logger = logging.getLogger(__name__)
 # Récupération du Super Admin
 try:
     SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
- Lark) except ValueError:
+except ValueError:
     SUPER_ADMIN_ID = 5117004360
 
 # Récupération du Canal de vente public
 CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@TonCanalDeVente")
 
-# Récupération sécurisée du Groupe de Modération pour éviter le crash (invalid literal for int)
+# Récupération sécurisée du Groupe de Modération pour éviter le crash
 groupe_mod_env = os.environ.get("GROUPE_MODERATION_ID", "")
 if groupe_mod_env.replace("-", "").isdigit():
     GROUPE_MODERATION_ID = int(groupe_mod_env)
