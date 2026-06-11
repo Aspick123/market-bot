@@ -386,7 +386,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Erreur callback {data}: {str(e)}")
         await query.message.reply_text(f"❌ Erreur : {str(e)}")
 
-def main():
+
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_categorie"] = update.message.text.strip()
     # On appelle proprement la fonction suivante pour ne pas laisser cette fonction vide !
@@ -497,7 +497,8 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return ATTENTE_PHOTOS
-    
+        
+def main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
