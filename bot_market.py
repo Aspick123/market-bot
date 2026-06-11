@@ -451,16 +451,24 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
         
     ctx.user_data["specs_choisies"] = choix
     return await afficher_choix_specificites(query.message.edit_reply_markup, ctx)
-async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
+
+    # Vérification du mode urgence/maintenance
+    from database_market import db
+    config = db.config.find_one({"_id": "mode_urgence"})
     
-    # On récupère la plateforme (ex: "Android", "PC")
-    plateforme = query.data.replace("plat:", "")
-    ctx.user_data["vente_plateforme"] = plateforme
-    
-    # Maintenant que le jeu et la plateforme sont stockés, on ouvre les cases à cocher !
-    return await afficher_choix_specificites(query.message.edit_text, ctx)
+    if config and config.get("actif", False):
+        if query:
+            await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
+        return
+
+    # Initialisation des variables pour le récapitulatif
+    choix = ctx.user_data.get("specs_choisies", [])
+    valeurs = ctx.user_data.get("specs_valeurs", {})
+
     
 
 async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
