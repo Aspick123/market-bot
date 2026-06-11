@@ -25,6 +25,10 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
+# --- IMPORTS DE NOS NOUVEAUX MODULES ---
+from moderation import soumettre_a_la_moderation, traitement_moderation
+from profil import afficher_profil, gestion_candidature
+
 # États de la conversation pour la création d'une annonce (Tunnel Avancé - Strict)
 (
     CHOIX_CATEGORIE,
@@ -37,12 +41,12 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
     CHOIX_DEVISE,
     ATTENTE_AUTRE_DEVISE,
     ATTENTE_PRIX,
-    CHOIX_PAIEMENT,         # Placé correctement au bon endroit
+    CHOIX_PAIEMENT,
     CHOIX_CRYPTO,
     ATTENTE_CONTACT,
     ATTENTE_DISPO,
     CONFIRMATION
-) = range(15)              # Augmenté à 15 états réels
+) = range(15)
 
 app = Flask("")
 
@@ -206,7 +210,7 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             f"💰 **Prix demandé :** `{prix} {devise}`\n"
             f"💳 **Paiements acceptés :** `{methodes}`\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-            "Souhaitez-vous valider et publier cette annonce ?"
+            "Souhaitez-vous valider et soumettre cette annonce à l'équipe ?"
         )
         kb = [
             [InlineKeyboardButton("✅ Valider et Publier", callback_data="publier:oui")],
@@ -236,21 +240,10 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
     
     if query.data == "publier:oui":
-        cat = ctx.user_data.get("vente_jeu", "Inconnu")
-        desc = ctx.user_data.get("vente_description", "Aucune description")
-        prix = ctx.user_data.get("vente_prix", 0)
-        
-        create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
-        
-        texte_succes = (
-            "🎉 **Félicitations ! Votre annonce a été publiée avec succès.**\n\n"
-            "Elle est désormais en ligne. Vous recevrez une notification directe si un utilisateur est intéressé."
-        )
-        await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
-    
+        # REDIRECTION : On envoie l'annonce vers moderation.py au lieu de publier direct
+        await soumettre_a_la_moderation(update, ctx)
     elif query.data == "publier:non":
         await query.message.edit_text("❌ **Création de l'annonce annulée.**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         
@@ -260,19 +253,33 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     uid = update.effective_user.id
 
+    # 1. Interception prioritaire des actions du module de modération
+    if data.startswith("mod:"):
+        await traitement_moderation(update, ctx)
+        return
+
+    # 2. Interception prioritaire des actions de candidature staff/gérant
+    if data.startswith("staff:"):
+        await gestion_candidature(update, ctx)
+        return
+
+    await query.answer()
+
     from database_market import db
     config = db.config.find_one({"_id": "mode_urgence"})
-    
     if config and config.get("actif", False) and uid != SUPER_ADMIN_ID:
         await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
         return
 
     try:
-        if data == "menu:cgu":
+        # LIEN VERS LE PROFIL UTILISATEUR
+        if data == "menu:mon_profil":
+            await afficher_profil(update, ctx)
+
+        elif data == "menu:cgu":
             cgu_text = (
                 "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
                 "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
@@ -538,12 +545,11 @@ def main():
         allow_reentry=True
     )
     
-    # TRÈS IMPORTANT : Le tunnel doit être ajouté AVANT le button_handler général
     application.add_handler(vente_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot démarré avec le module Vente actif !")
+    logger.info("🚀 Bot démarré avec modération et profils actifs !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
