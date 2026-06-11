@@ -129,7 +129,6 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
     
     if annonce:
-        # On cherche les infos du vendeur pour afficher son @Username
         vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
         username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
         paiements = ", ".join(annonce.get("paiements", []))
@@ -368,8 +367,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        if data == "menu:mon_profil":
+        # Sécurité élargie pour être sûr d'ouvrir l'espace membre
+        if "profil" in data:
             await afficher_profil(update, ctx)
+            return
 
         elif data == "menu:cgu":
             cgu_text = (
@@ -453,7 +454,7 @@ def main():
         allow_reentry=True
     )
     
-    # 2. Conversation de la Recherche Flash (Oui/Non) - Regex élargie pour attraper tous les clics
+    # 2. Conversation de la Recherche Flash (Oui/Non)
     recherche_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_recherche, pattern=".*recherche.*")],
         states={
@@ -468,7 +469,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot connecté de bout en bout avec Recherche Flash validée !")
+    logger.info("🚀 Bot connecté de bout en bout avec Profil sécurisé et Recherche Flash !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
