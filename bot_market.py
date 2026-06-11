@@ -285,17 +285,19 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📝 **Description :** {description}\n"
     )
 
-    # Affichage du récapitulatif (alignement corrigé sans le "else:" inutile)
+        # Affichage du récapitulatif
     await query.message.edit_text(texte, reply_markup=get_confirmation_keyboard(), parse_mode="Markdown")
-            
-        elif data == "menu:cgu":
-            cgu_text = (
-                "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
-                "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
-                "2. Les transactions doivent respecter le système d'arbitrage sécurisé du bot.\n"
-                "3. La plateforme décline toute responsabilité hors du système d'arbitrage."
-            )
-            await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+
+    # Alignement corrigé pour la suite des conditions
+    if data == "menu:cgu":
+        cgu_text = (
+            "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
+            "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
+            "2. Les transactions doivent respecter le système d'arbitrage sécurisé du bot.\n"
+            "3. La plateforme décline toute responsabilité hors du système d'arbitrage."
+        )
+        await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+
             
         elif data == "menu:admin_panel":
             if uid != SUPER_ADMIN_ID:
