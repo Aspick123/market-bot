@@ -289,7 +289,7 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.message.edit_text(texte, reply_markup=get_confirmation_keyboard(), parse_mode="Markdown")
 
     # Alignement corrigé pour la suite des conditions
-    if data == "menu:cgu":
+    elif
         cgu_text = (
             "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
             "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
