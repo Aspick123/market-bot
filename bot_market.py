@@ -26,6 +26,10 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
+# --- IMPORTS DE NOS AUTRES MODULES ---
+from moderation import soumettre_a_la_moderation, traitement_moderation
+from profil import afficher_profil, gestion_candidature
+
 # États de la conversation globale
 (
     CHOIX_CATEGORIE,
@@ -48,7 +52,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 # États additionnels hors tunnel de vente de base
 ATTENTE_RECHERCHE_JEU = 99
 ATTENTE_MODIF_PRIX = 100
-ATTENTE_MODIF_DESC = 101  # <-- Nouvel état pour la modification de la description
+ATTENTE_MODIF_DESC = 101
 
 app = Flask("")
 
@@ -68,6 +72,8 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAFxtyQig1cNZDvYF1PnTTbOlDOW1POlrx4")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+# 📢 ID du canal de vente (pense à ajouter l'ID de ton canal dans tes variables Render ou ici directement)
+CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@TonCanalDeVente") 
 
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -98,7 +104,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
     
-    # Injection du bouton Parcourir sous le bouton Recherche Flash
     boutons_modifies = []
     for ligne in reply_markup.inline_keyboard:
         boutons_modifies.append(ligne)
@@ -116,15 +121,12 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-# ==================== LOGIQUE DE LA RECHERCHE FLASH ====================
+# ==================== LOGIQUE DE RECHERCHE & AFFICHAGE MULTI-MODULES ====================
 
 async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.edit_text(
-        "🔍 **Moteur de Recherche Flash**\n\nEntrez le nom exact du jeu que vous recherchez :",
-        parse_mode="Markdown"
-    )
+    await query.message.edit_text("🔍 **Moteur de Recherche Flash**\n\nEntrez le nom exact du jeu que vous recherchez :", parse_mode="Markdown")
     return ATTENTE_RECHERCHE_JEU
 
 async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -137,13 +139,11 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **NON. Aucune annonce disponible** pour *{jeu_recherche}*.", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     return ConversationHandler.END
 
-async def afficher_une_annonce(reply_func, annonce):
-    vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
-    username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
+# 💡 Générateur universel du texte d'annonce (Utilisé pour le bot ET le canal)
+def generer_texte_annonce(annonce, username_vendeur):
     paiements = ", ".join(annonce.get("paiements", []))
-    
-    texte_offre = (
-        "🟢 **OFFRE DISPONIBLE !**\n"
+    return (
+        "🛒 **ANNONCE EN LIGNE — MARKETPLACE**\n"
         "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"🎮 **Jeu :** `{annonce['categorie']}`\n"
         f"💻 **Plateforme :** `{annonce.get('plateforme', 'Non spécifiée')}`\n"
@@ -154,12 +154,45 @@ async def afficher_une_annonce(reply_func, annonce):
         f"👤 **Vendeur :** @{username_vendeur}\n\n"
         "💡 *Conseil : Contactez d'abord le vendeur en privé. En cas d'accord, utilisez le bouton ci-dessous pour demander l'arbitrage.*"
     )
+
+async def afficher_une_annonce(reply_func, annonce):
+    vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
+    username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
+    
+    texte_offre = generer_texte_annonce(annonce, username_vendeur)
     kb = [
         [InlineKeyboardButton("💬 Contacter le Vendeur", url=f"https://t.me/{username_vendeur}")],
         [InlineKeyboardButton("⚡ Sécuriser via un Gérant (Arbitrage)", callback_data=f"achat:arbitrage:{annonce['_id']}")],
         [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu:retour_start")]
     ]
     await reply_func(texte_offre, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+# 🛰️ Fonction de mise à jour automatique et dynamique sur le canal Telegram
+async def synchroniser_modification_canal(ctx: ContextTypes.DEFAULT_TYPE, annonce_id):
+    try:
+        annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+        if not annonce or "canal_message_id" not in annonce:
+            return # L'annonce n'a pas (ou pas encore) de message lié sur le canal
+            
+        vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
+        username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
+        
+        nouveau_texte = generer_texte_annonce(annonce, username_vendeur)
+        kb_canal = [
+            [InlineKeyboardButton("💬 Contacter le Vendeur", url=f"https://t.me/{username_vendeur}")],
+            [InlineKeyboardButton("⚡ Demander un Arbitrage", url=f"https://t.me/{ctx.bot.username}?start=arbitrage_{annonce_id}")]
+        ]
+        
+        # Modification en direct du message sur le canal public !
+        await ctx.bot.edit_message_text(
+            chat_id=CANAL_VENTE_ID,
+            message_id=int(annonce["canal_message_id"]),
+            text=nouveau_texte,
+            reply_markup=InlineKeyboardMarkup(kb_canal),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Erreur lors de la synchronisation avec le canal : {e}")
 
 
 # ==================== LOGIQUE DU MODULE VENTE (TUNNEL) ====================
@@ -170,7 +203,6 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     ctx.user_data["photos"] = []
     ctx.user_data["vente_paiements"] = []
-    
     await query.message.edit_text("🎮 **Étape 1 : Quel est le jeu concerné ?**\n\nEnvoyez le nom exact du jeu vidéo.", parse_mode="Markdown")
     return ATTENTE_AUTRE_JEU
 
@@ -292,7 +324,7 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ==================== LOGIQUE DE GESTION DES ANNONCES VENDEUR (MODIF / SUPPR) ====================
+# ==================== LOGIQUE DE GESTION DES ANNONCES VENDEUR ====================
 
 async def executer_modification_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nouveau_prix = update.message.text.strip()
@@ -303,10 +335,13 @@ async def executer_modification_prix(update: Update, ctx: ContextTypes.DEFAULT_T
     annonce_id = ctx.user_data.get("modif_annonce_id")
     if annonce_id:
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"prix": int(nouveau_prix)}})
-        await update.message.reply_text("✅ **Le prix de votre annonce a été modifié avec succès !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        
+        # 🔄 Synchroniser la modification en temps réel dans le canal public !
+        await synchroniser_modification_canal(ctx, annonce_id)
+        
+        await update.message.reply_text("✅ **Le prix a été modifié dans la base et mis à jour sur le canal !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ Une erreur est survenue.", reply_markup=get_back_to_start_keyboard())
-        
     return ConversationHandler.END
 
 async def executer_modification_description(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -315,10 +350,13 @@ async def executer_modification_description(update: Update, ctx: ContextTypes.DE
     
     if annonce_id:
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"description": nouvelle_desc}})
-        await update.message.reply_text("✅ **La description de votre annonce a été modifiée avec succès !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        
+        # 🔄 Synchroniser la modification en temps réel dans le canal public !
+        await synchroniser_modification_canal(ctx, annonce_id)
+        
+        await update.message.reply_text("✅ **La description a été modifiée dans la base et mise à jour sur le canal !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ Une erreur est survenue.", reply_markup=get_back_to_start_keyboard())
-        
     return ConversationHandler.END
 
 
@@ -397,8 +435,18 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("mon_annonce:suppr:"):
         await query.answer()
-        db.annonces.delete_one({"_id": ObjectId(data.split(":")[2])})
-        await query.message.edit_text("🗑️ **Votre annonce a bien été définitivement supprimée du catalogue.**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        aid = data.split(":")[2]
+        
+        # 🗑️ Essayer également de supprimer le message sur le canal public si existant
+        try:
+            anc = db.annonces.find_one({"_id": ObjectId(aid)})
+            if anc and "canal_message_id" in anc:
+                await ctx.bot.delete_message(chat_id=CANAL_VENTE_ID, message_id=int(anc["canal_message_id"]))
+        except Exception as e:
+            logger.error(f"Impossible de supprimer le message du canal : {e}")
+            
+        db.annonces.delete_one({"_id": ObjectId(aid)})
+        await query.message.edit_text("🗑️ **Votre annonce a été supprimée du catalogue et retirée du canal !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
     if data.startswith("mon_annonce:modif_prix:"):
@@ -420,7 +468,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not annonce: return
         
         vendeur_data = db.users.find_one({"_id": annonce["vendeur_id"]})
-        username_vendeur = vendeur_data.get("username", "Inconnu") if vendeur_data else "Inconnu"
+        username_vendeur = seller_username = vendeur_data.get("username", "Inconnu") if vendeur_data else "Inconnu"
         
         await query.message.reply_text("⏳ **Demande d'arbitrage transmise !**\n\nUn Gérant Arbitre prendra contact sous peu.", parse_mode="Markdown")
         
@@ -469,12 +517,11 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # Intégration de la modification de prix, description et gestion globale
     vente_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(debut_vente, pattern="^menu:vendre$"),
             CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_prix:"),
-            CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_desc:") # Déclencheur du bouton modif desc
+            CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_desc:")
         ],
         states={
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
@@ -485,7 +532,7 @@ def main():
             CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
             CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")],
             ATTENTE_MODIF_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_prix)],
-            ATTENTE_MODIF_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_description)] # Capturer le nouveau texte
+            ATTENTE_MODIF_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_description)]
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
@@ -503,7 +550,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Marketplace Bot mis à jour (Modif Description Active) !")
+    logger.info("🚀 Marketplace Bot mis à jour (Synchronisation Canal Active) !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
