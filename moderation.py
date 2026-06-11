@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from bson.objectid import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -7,11 +8,27 @@ from database_market import db
 
 logger = logging.getLogger(__name__)
 
-# Récupération des configurations via l'environnement
-SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+# --- CONFIGURATION SÉCURISÉE DES VARIABLES D'ENVIRONNEMENT ---
+
+# Récupération du Super Admin
+try:
+    SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+ Lark) except ValueError:
+    SUPER_ADMIN_ID = 5117004360
+
+# Récupération du Canal de vente public
 CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@TonCanalDeVente")
-# ID du groupe privé où les modérateurs reçoivent les demandes de validation
-GROUPE_MODERATION_ID = int(os.environ.get("GROUPE_MODERATION_ID", "-100XXXXXXXXXX"))
+
+# Récupération sécurisée du Groupe de Modération pour éviter le crash (invalid literal for int)
+groupe_mod_env = os.environ.get("GROUPE_MODERATION_ID", "")
+if groupe_mod_env.replace("-", "").isdigit():
+    GROUPE_MODERATION_ID = int(groupe_mod_env)
+else:
+    logger.warning("⚠️ GROUPE_MODERATION_ID n'est pas configuré ou est invalide sur Render. Pense à ajouter la variable d'environnement.")
+    GROUPE_MODERATION_ID = 0  # Valeur temporaire pour éviter le crash au démarrage
+
+
+# --- FONCTIONS DE MODÉRATION ---
 
 async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
@@ -23,6 +40,10 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
     uid = update.effective_user.id
     username_vendeur = update.effective_user.username or update.effective_user.first_name
 
+    if GROUPE_MODERATION_ID == 0:
+        await query.answer("❌ Configuration manquante. Le groupe de modération n'est pas configuré.", show_alert=True)
+        return
+
     # 1. Préparation de l'objet Annonce pour MongoDB
     nouvelle_annonce = {
         "vendeur_id": uid,
@@ -31,10 +52,10 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         "description": ctx.user_data.get("vente_description"),
         "prix": ctx.user_data.get("vente_prix"),
         "devise": ctx.user_data.get("vente_devise"),
-        "paiements": ctx.user_data.get("vente_paiements"),
+        "paiements": ctx.user_data.get("vente_paiements", []),
         "photos": ctx.user_data.get("photos", []),
         "statut": "en_attente",
-        "date_creation": ctx.user_data.get("date_creation", os.time.time() if hasattr(os, "time") else None) 
+        "date_creation": time.time()
     }
 
     # Insertion dans la base de données
@@ -42,7 +63,7 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
     annonce_id = resultat.inserted_id
 
     # 2. Construction du ticket destiné aux modérateurs
-    paiements_txt = ", ".join(nouvelle_annonce["paiements"])
+    paiements_txt = ", ".join(nouvelle_annonce["paiements"]) if nouvelle_annonce["paiements"] else "Non spécifié"
     texte_mod = (
         "🚨 **NOUVELLE ANNONCE À MODÉRER**\n"
         "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -118,7 +139,7 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         # 1. Génération du texte final destiné au canal public
-        paiements_txt = ", ".join(annonce.get("paiements", []))
+        paiements_txt = ", ".join(annonce.get("paiements", [])) if annonce.get("paiements") else "Non spécifié"
         texte_canal = (
             "🛒 **ANNONCE EN LIGNE — MARKETPLACE**\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -155,7 +176,7 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
 
-            # 🔥 LE PLUS IMPORTANT : Enregistrer le statut ET le canal_message_id
+            # 🔥 ENREGISTREMENT CRUCIAL : Sauvegarde du statut et du canal_message_id
             db.annonces.update_one(
                 {"_id": ObjectId(annonce_id)},
                 {"$set": {"statut": "valide", "canal_message_id": msg_canal.message_id}}
@@ -169,26 +190,28 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
             except Exception:
-                pass # Le vendeur a peut-être bloqué le bot
+                pass 
 
             # Mettre à jour le ticket dans le groupe de modération
             await query.answer("✅ Annonce publiée sur le canal !")
             await query.message.edit_reply_markup(reply_markup=None)
+            
+            mod_username = update.effective_user.username or update.effective_user.first_name
             if query.message.caption:
-                await query.message.edit_caption(caption=f"{query.message.caption}\n\n🟢 **ACCEPTEE par @{update.effective_user.username}**")
+                await query.message.edit_caption(caption=f"{query.message.caption}\n\n🟢 **ACCEPTEE par @{mod_username}**")
             else:
-                await query.message.edit_text(text=f"{query.message.text}\n\n🟢 **ACCEPTEE par @{update.effective_user.username}**")
+                await query.message.edit_text(text=f"{query.message.text}\n\n🟢 **ACCEPTEE par @{mod_username}**")
 
         except Exception as e:
             logger.error(f"Erreur lors de la publication sur le canal : {e}")
-            await query.answer("❌ Erreur lors de la publication sur le canal.", show_alert=True)
+            await query.answer("❌ Erreur lors de la publication. Vérifie que le bot est Admin du canal.", show_alert=True)
 
     # --- ACTION : REFUSER L'ANNONCE ---
     elif action == "refuser":
         # Modification du statut en base de données
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "refuse"}})
 
-        # Notifier le vendeur de l'annulation
+        # Notifier le vendeur du refus
         try:
             await ctx.bot.send_message(
                 chat_id=vendeur_id,
@@ -201,7 +224,9 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Mettre à jour le ticket de modération
         await query.answer("❌ Annonce rejetée.")
         await query.message.edit_reply_markup(reply_markup=None)
+        
+        mod_username = update.effective_user.username or update.effective_user.first_name
         if query.message.caption:
-            await query.message.edit_caption(caption=f"{query.message.caption}\n\n🔴 **REFUSEE par @{update.effective_user.username}**")
+            await query.message.edit_caption(caption=f"{query.message.caption}\n\n🔴 **REFUSEE par @{mod_username}**")
         else:
-            await query.message.edit_text(text=f"{query.message.text}\n\n🔴 **REFUSEE par @{update.effective_user.username}**")
+            await query.message.edit_text(text=f"{query.message.text}\n\n🔴 **REFUSEE par @{mod_username}**")
