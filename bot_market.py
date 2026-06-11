@@ -118,48 +118,6 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ATTENTE_AUTRE_JEU
 
-async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "cat:autre":
-        await query.message.edit_text(
-            "🎮 **Quel est le nom de votre jeu ?**\n\nVeuillez écrire et envoyer le nom exact du jeu concerné.",
-            parse_mode="Markdown"
-        )
-        return ATTENTE_AUTRE_JEU
-    cat_mapping = {
-        "cat:efootball": "eFootball Mobile",
-        "cat:genshin": "Genshin Impact",
-        "cat:brawl_stars": "Brawl Stars"
-    }
-    ctx.user_data["vente_categorie"] = cat_mapping.get(query.data, "Inconnu")
-    await query.message.edit_text(
-        f"📝 **Étape 2 : Description de l'offre ({ctx.user_data['vente_categorie']})**\n\nVeuillez envoyer les détails de votre compte.",
-        parse_mode="Markdown"
-    )
-    return ATTENTE_DESCRIPTION
-
-async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # On enregistre le nom du jeu tapé par l'utilisateur
-    ctx.user_data["vente_jeu"] = update.message.text.strip()
-    
-    # On prépare les boutons des plateformes
-    kb = [
-        [InlineKeyboardButton("📱 Android", callback_data="plat:Android")],
-        [InlineKeyboardButton("🍏 iOS (Apple)", callback_data="plat:iOS")],
-        [InlineKeyboardButton("💻 PC", callback_data="plat:PC")],
-        [InlineKeyboardButton("🎮 Console (PS/Xbox/Switch)", callback_data="plat:Console")],
-        [InlineKeyboardButton("🌐 Multiplateforme (Partout)", callback_data="plat:Multi")]
-    ]
-    
-    await update.message.reply_text(
-        "🔌 **Sur quelle plateforme se trouve votre compte ?**\n\n"
-        "Sélectionnez le support principal de votre compte :",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-    # On redirige vers un état intermédiaire (CHOIX_CATEGORIE fera l'affaire pour intercepter le clic)
-    return CHOIX_CATEGORIE
 
 async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_description"] = update.message.text
@@ -402,19 +360,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["vente_categorie"] = update.message.text.strip()
-    # On appelle proprement la fonction suivante pour ne pas laisser cette fonction vide !
-    return await afficher_choix_specificites(update.message.reply_text, ctx)
-async def afficher_choix_specificites(reply_func, ctx):
-    choix = ctx.user_data.get("specs_choisies", [])
+    # On enregistre proprement le nom du jeu tapé par l'utilisateur
+    ctx.user_data["vente_jeu"] = update.message.text.strip()
     
-    # Liste des caractéristiques disponibles
-    specs_disponibles = [
-        ("👤 Personnages", "spec:Persos"),
-        ("👕 Skins", "spec:Skins"),
-        ("⚔️ Armes", "spec:Armes"),
-        ("🔮 Artefacts", "spec:Artefacts"),
-        ("💎 Objets Rares", "spec:Objets")
+    # On prépare les boutons des plateformes
+    kb = [
+        [InlineKeyboardButton("📱 Android", callback_data="plat:Android")],
+        [InlineKeyboardButton("🍏 iOS (Apple)", callback_data="plat:iOS")],
+        [InlineKeyboardButton("💻 PC", callback_data="plat:PC")],
+        [InlineKeyboardButton("🎮 Console (PS/Xbox/Switch)", callback_data="plat:Console")],
+        [InlineKeyboardButton("🌐 Multiplateforme (Partout)", callback_data="plat:Multi")]
+    ]
+    
+    await update.message.reply_text(
+        "🔌 **Sur quelle plateforme se trouve votre compte ?**\n\n"
+        "Sélectionnez le support principal de votre compte :",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    # On redirige vers notre nouvel état intermédiaire
+    return CHOIX_PLATEFORME
     ]
     
     kb = []
