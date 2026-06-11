@@ -251,9 +251,6 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         desc = ctx.user_data.get("vente_description")
         prix = ctx.user_data.get("vente_prix")
         from database_market import create_annonce
-        else:
-        # Si ce n'est pas "Genshin", on passe directement à la suite
-        pass
 
     return CONFIRMATION
 
