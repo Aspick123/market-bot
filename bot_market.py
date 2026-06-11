@@ -3,6 +3,7 @@ import time
 import logging
 from threading import Thread
 from flask import Flask
+from bson.objectid import ObjectId
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -122,6 +123,7 @@ async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     jeu_recherche = update.message.text.strip()
     
+    # Recherche d'une annonce valide correspondante
     annonce = db.annonces.find_one({
         "categorie": {"$regex": f"^{jeu_recherche}$", "$options": "i"},
         "statut": "valide"
@@ -141,10 +143,18 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"💳 **Paiements acceptés :** `{paiements}`\n"
             f"📝 **Description :**\n{annonce['description']}\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"👤 **Contact Vendeur :** @{username_vendeur}\n\n"
-            "⚠️ *Pour votre sécurité, passez toujours par notre système d'arbitrage officiel.*"
+            f"👤 **Vendeur :** @{username_vendeur}\n\n"
+            "💡 *Conseil : Utilisez le bouton bleu ci-dessous pour discuter directement avec le vendeur. Si vous vous mettez d'accord, demandez l'arbitrage pour sécuriser la transaction.*"
         )
-        await update.message.reply_text(reponse_oui, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        
+        # Boutons d'interactions directes acheteur -> vendeur / gérant
+        kb = [
+            [InlineKeyboardButton("💬 Contacter le Vendeur", url=f"https://t.me/{username_vendeur}")],
+            [InlineKeyboardButton("⚡ Sécuriser via un Gérant (Arbitrage)", callback_data=f"achat:arbitrage:{annonce['_id']}")],
+            [InlineKeyboardButton("🔙 Retour au Menu Principal", callback_data="menu:retour_start")]
+        ]
+        
+        await update.message.reply_text(reponse_oui, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     else:
         reponse_non = (
             "🔴 **NON. Aucune annonce disponible.**\n\n"
@@ -350,10 +360,53 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
     uid = update.effective_user.id
 
-    # 🔄 REDIRECTION IMMÉDIATE POUR LE BOUTON RETOUR MENU
+    # 🔄 REDIRECTION ET RÈGLAGE DU BOUTON RETOUR MENU PRINCIPAL
     if data == "menu:retour_start":
         await query.answer()
         await start_command(update, ctx)
+        return
+
+    # ⚡ TRANSACTION SÉCURISÉE (DEMANDE D'ARBITRAGE EN DERNIER RECOURS)
+    if data.startswith("achat:arbitrage:"):
+        await query.answer()
+        annonce_id = data.split(":")[2]
+        
+        annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+        if not annonce:
+            await query.message.reply_text("❌ Cette annonce n'est plus disponible ou a été retirée.")
+            return
+            
+        vendeur_id = annonce["vendeur_id"]
+        vendeur_data = db.users.find_one({"_id": vendeur_id})
+        username_vendeur = vendeur_data.get("username", "Inconnu") if vendeur_data else "Inconnu"
+        
+        # 1. Message de confirmation immédiat à l'acheteur
+        await query.message.reply_text(
+            "⏳ **Demande d'arbitrage transmise !**\n\n"
+            "Un Gérant Arbitre vient d'être mis au courant pour sécuriser votre transaction.\n"
+            "Veuillez patienter le temps qu'il prenne contact avec vous et le vendeur pour créer le salon d'échange sécurisé.",
+            parse_mode="Markdown"
+        )
+        
+        # 2. Alerte envoyée au Super Admin (Gérant de la plateforme)
+        ticket_arbitrage = (
+            "🚨 **NOUVELLE DEMANDE D'ARBITRAGE (TRANSACTION)**\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"👤 **Acheteur :** @{update.effective_user.username or 'Sans_Pseudo'} (ID: `{uid}`)\n"
+            f"📦 **Jeu ciblé :** `{annonce['categorie']}` (Prix: {annonce['prix']} {annonce['devise']})\n"
+            f"👤 **Vendeur :** @{username_vendeur} (ID: `{vendeur_id}`)\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            "ℹ️ *Action du Staff : Veuillez initier un groupe à 3 pour encadrer le paiement et la livraison des identifiants.*"
+        )
+        
+        try:
+            await ctx.bot.send_message(
+                chat_id=SUPER_ADMIN_ID,
+                text=ticket_arbitrage,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Impossible d'alerter l'admin pour arbitrage : {e}")
         return
 
     if data.startswith("mod:"):
@@ -437,6 +490,7 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
     
+    # 1. Gestionnaire de Conversation : Vente
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
@@ -455,6 +509,7 @@ def main():
         allow_reentry=True
     )
     
+    # 2. Gestionnaire de Conversation : Recherche Flash
     recherche_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_recherche, pattern=".*recherche.*")],
         states={
@@ -469,7 +524,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot connecté avec gestion du bouton Retour réparée !")
+    logger.info("🚀 Marketplace Bot entièrement configuré avec Tunnel d'Arbitrage !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
