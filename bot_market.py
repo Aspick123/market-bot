@@ -122,7 +122,6 @@ async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     jeu_recherche = update.message.text.strip()
     
-    # On va chercher dans MongoDB une annonce pour ce jeu qui possède le statut "valide"
     annonce = db.annonces.find_one({
         "categorie": {"$regex": f"^{jeu_recherche}$", "$options": "i"},
         "statut": "valide"
@@ -133,7 +132,6 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
         paiements = ", ".join(annonce.get("paiements", []))
         
-        # RÉPONSE OUI !
         reponse_oui = (
             "🟢 **OUI ! Une annonce est disponible !**\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -148,7 +146,6 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(reponse_oui, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
-        # RÉPONSE NON
         reponse_non = (
             "🔴 **NON. Aucune annonce disponible.**\n\n"
             f"Désolé, il n'y a actuellement aucun compte vérifié mis en vente pour le jeu *{jeu_recherche}*."
@@ -353,6 +350,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
     uid = update.effective_user.id
 
+    # 🔄 REDIRECTION IMMÉDIATE POUR LE BOUTON RETOUR MENU
+    if data == "menu:retour_start":
+        await query.answer()
+        await start_command(update, ctx)
+        return
+
     if data.startswith("mod:"):
         await traitement_moderation(update, ctx)
         return
@@ -367,7 +370,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Sécurité élargie pour être sûr d'ouvrir l'espace membre
         if "profil" in data:
             await afficher_profil(update, ctx)
             return
@@ -414,8 +416,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton("🔄 Rafraîchir le Panel", callback_data="menu:admin_panel")]]
             await query.message.edit_text("⚙️ Statut de maintenance mis à jour !", reply_markup=InlineKeyboardMarkup(kb))
 
-        elif data in ["menu:mes_annonces", "menu:historique", "menu:parrainage", 
-                      "menu:defis", "menu:leaderboard", "menu:litige", "menu:alertes", "menu:blacklist"]:
+        elif data in ["menu:mes_annonces", "menu:historique", "menu:parrainage", "menu:historique_achats",
+                      "menu:defis", "menu:leaderboard", "menu:litige", "menu:alertes", "menu:blacklist", "menu:recharger"]:
             feature_name = data.replace("menu:", "").replace("_", " ").title()
             await query.message.edit_text(
                 f"🚧 **Module [{feature_name}]**\n\nCe module est en cours d'intégration.",
@@ -435,7 +437,6 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # 1. Conversation du Tunnel de Vente
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
@@ -454,7 +455,6 @@ def main():
         allow_reentry=True
     )
     
-    # 2. Conversation de la Recherche Flash (Oui/Non)
     recherche_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_recherche, pattern=".*recherche.*")],
         states={
@@ -469,7 +469,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Bot connecté de bout en bout avec Profil sécurisé et Recherche Flash !")
+    logger.info("🚀 Bot connecté avec gestion du bouton Retour réparée !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
