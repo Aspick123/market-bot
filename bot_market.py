@@ -110,6 +110,7 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["specs_choisies"] = []
     ctx.user_data["specs_valeurs"] = {}
     ctx.user_data["photos"] = []
+    ctx.user_data["vente_paiements"] = []
     
     await query.message.edit_text(
         "🎮 **Étape 1 : Quel est le jeu concerné ?**\n\n"
@@ -157,7 +158,6 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return ATTENTE_PRIX
             
         ctx.user_data["vente_prix"] = int(texte_prix)
-        ctx.user_data["vente_paiements"] = []
         
         return await afficher_choix_paiement(update.message.reply_text, ctx)
 
@@ -239,12 +239,25 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    
     if query.data == "publier:oui":
-        cat = ctx.user_data.get("vente_jeu")
-        desc = ctx.user_data.get("vente_description")
-        prix = ctx.user_data.get("vente_prix")
+        cat = ctx.user_data.get("vente_jeu", "Inconnu")
+        desc = ctx.user_data.get("vente_description", "Aucune description")
+        prix = ctx.user_data.get("vente_prix", 0)
+        
+        # Enregistrement en base de données
         create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
-    return CONFIRMATION
+        
+        texte_succes = (
+            "🎉 **Félicitations ! Votre annonce a été publiée avec succès.**\n\n"
+            "Elle est désormais visible sur le Marketplace. Vous recevrez une notification directe si un acheteur est intéressé."
+        )
+        await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    
+    elif query.data == "publier:non":
+        await query.message.edit_text("❌ **Création de l'annonce annulée.**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        
+    return ConversationHandler.END
 
 # ---------------- GESTIONNAIRE GLOBAL DES BOUTONS MENUS ----------------
 
@@ -319,20 +332,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_back_to_start_keyboard(),
                 parse_mode="Markdown"
             )
-            
-        elif data == "menu:confirmation_recap":
-            jeu = ctx.user_data.get("vente_jeu", "Inconnu")
-            plateforme = ctx.user_data.get("vente_plateforme", "Non spécifiée")
-            description = ctx.user_data.get("vente_description", "Aucune description")
-            
-            texte = (
-                "✨ **RÉCAPITULATIF DE VOTRE OFFRE** ✨\n\n"
-                f"🎮 **Jeu :** {jeu}\n"
-                f"🔌 **Plateforme :** {plateforme}\n"
-                f"📝 **Description :** {description}\n"
-            )
-            # Ajoute ici ton clavier de confirmation personnalisé si nécessaire
-            await query.message.edit_text(texte, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Erreur callback {data}: {str(e)}")
@@ -428,7 +427,7 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
 async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte = update.message.text.strip()
     
-    if not texte.isdigit():
+    if not text.isdigit():
         await update.message.reply_text("❌ Veuillez entrer un nombre valide (uniquement des chiffres) :")
         return ATTENTE_VALEURS_SPECS
         
@@ -510,9 +509,6 @@ async def contact_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def dispo_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return CONFIRMATION
 
-async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    return ConversationHandler.END
-
 # ---------------- ENTRÉE PRINCIPALE DU PROGRAMME ----------------
 
 def main():
@@ -539,7 +535,7 @@ def main():
             CHOIX_CRYPTO: [CallbackQueryHandler(crypto_choisie_handler, pattern="^crypto:")],
             ATTENTE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_recu)],
             ATTENTE_DISPO: [MessageHandler(filters.TEXT & ~filters.COMMAND, dispo_recue)],
-            CONFIRMATION: [CallbackQueryHandler(confirmation_handler, pattern="^(publier:|annuler$)")],
+            CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")],
             CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")]
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
