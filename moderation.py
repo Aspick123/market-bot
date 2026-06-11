@@ -5,11 +5,13 @@ from database_market import db
 
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 
+# 📢 Identifiant public de ton canal Telegram
+CANAL_MARKETPLACE_ID = "@comptedejeux" 
+
 async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     
-    # 1. Récupération des données du tunnel de vente stockées dans le contexte
     cat = ctx.user_data.get("vente_jeu", "Inconnu")
     desc = ctx.user_data.get("vente_description", "Aucune description")
     prix = ctx.user_data.get("vente_prix", 0)
@@ -17,7 +19,8 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
     plat = ctx.user_data.get("vente_plateforme", "Non spécifiée")
     paiements = ", ".join(ctx.user_data.get("vente_paiements", []))
     
-    # 2. On crée l'annonce dans MongoDB avec le statut "en_attente"
+    images = ctx.user_data.get("photos", [])
+    
     annonce_id = db.annonces.insert_one({
         "vendeur_id": uid,
         "categorie": cat,
@@ -26,18 +29,18 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         "prix": prix,
         "devise": devise,
         "paiements": ctx.user_data.get("vente_paiements", []),
+        "photos": images,
         "statut": "en_attente"
     }).inserted_id
 
-    # 3. Notification de confirmation pour le vendeur
     await query.message.edit_text(
         "⏳ **Annonce soumise avec succès !**\n\n"
         "Votre annonce a été envoyée à l'équipe de modération.\n"
-        "Vous recevrez une notification dès qu'un Gérant ou le Fondateur l'aura validée.",
+        "Elle sera automatiquement publiée sur le canal officiel dès sa validation.",
         parse_mode="Markdown"
     )
 
-    # 4. Envoi du ticket de modération au Fondateur (toi)
+    # Ticket de modération reçu par le Fondateur (toi)
     ticket_text = (
         "🔔 **NOUVELLE ANNONCE À MODÉRER**\n"
         "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -48,15 +51,13 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         f"💳 **Paiements :** `{paiements}`\n"
         f"📝 **Description :**\n{desc}\n"
         "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "Choisissez l'action à mener pour cette offre :"
+        "Cliquez ci-dessous pour publier directement sur le canal :"
     )
     
-    kb = [
-        [
-            InlineKeyboardButton("✅ Approuver", callback_data=f"mod:approuver:{annonce_id}"),
-            InlineKeyboardButton("❌ Rejeter", callback_data=f"mod:rejeter:{annonce_id}")
-        ]
-    ]
+    kb = [[
+        InlineKeyboardButton("✅ Approuver & Publier", callback_data=f"mod:approuver:{annonce_id}"),
+        InlineKeyboardButton("❌ Rejeter", callback_data=f"mod:rejeter:{annonce_id}")
+    ]]
     
     try:
         await ctx.bot.send_message(
@@ -73,8 +74,8 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     data = query.data.split(":")
-    action = data[1]       # approuver / rejeter
-    annonce_id = data[2]   # ID MongoDB
+    action = data[1]       
+    annonce_id = data[2]   
     
     from bson.objectid import ObjectId
     annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
@@ -84,30 +85,62 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     vendeur_id = annonce["vendeur_id"]
+    vendeur_info = db.users.find_one({"_id": vendeur_id})
+    username_vendeur = vendeur_info.get("username", "Inconnu") if vendeur_info else "Inconnu"
 
     if action == "approuver":
-        # On valide l'annonce pour qu'elle devienne visible lors des recherches
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "valide"}})
-        await query.message.edit_text(f"✅ **Annonce {annonce_id} approuvée et en ligne !**")
+        await query.message.edit_text(f"✅ **Annonce approuvée ! Envoyée sur @comptedejeux**")
         
+        # 📢 MESSAGE PROPRE ENVOYÉ AUTOMATIQUEMENT DANS TON CANAL
+        texte_canal = (
+            "🛒 **NOUVELLE OFFRE DISPONIBLE !**\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"🎮 **Jeu :** #{annonce['categorie'].replace(' ', '_')}\n"
+            f"💻 **Plateforme :** `{annonce.get('plateforme', 'Non spécifiée')}`\n"
+            f"💰 **Prix :** `{annonce['prix']} {annonce['devise']}`\n"
+            f"💳 **Paiements :** `{(', '.join(annonce.get('paiements', [])))}`\n"
+            f"📝 **Description :**\n{annonce['description']}\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"👤 **Vendeur :** @{username_vendeur}\n\n"
+            "⚠️ *Pour votre sécurité, contactez le fondateur pour l'arbitrage de la transaction.*"
+        )
+        
+        try:
+            # Si le vendeur a mis une photo dans le tunnel, on l'affiche dans le canal
+            if annonce.get("photos") and len(annonce["photos"]) > 0:
+                await ctx.bot.send_photo(
+                    chat_id=CANAL_MARKETPLACE_ID,
+                    photo=annonce["photos"][0],
+                    caption=texte_canal,
+                    parse_mode="Markdown"
+                )
+            else:
+                await ctx.bot.send_message(
+                    chat_id=CANAL_MARKETPLACE_ID,
+                    text=texte_canal,
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            print(f"Erreur lors de la publication automatique : {e}")
+        
+        # Alerte le vendeur en MP
         try:
             await ctx.bot.send_message(
                 chat_id=vendeur_id,
-                text=f"🎉 **Bonne nouvelle !** Votre annonce pour *{annonce['categorie']}* a été approuvée par l'équipe et est maintenant publiée !",
+                text=f"🎉 **Félicitations !** Votre annonce pour *{annonce['categorie']}* a été validée et vient d'être publiée sur le canal officiel @comptedejeux !",
                 parse_mode="Markdown"
             )
-        except Exception:
-            pass
+        except Exception: pass
 
     elif action == "rejeter":
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "rejete"}})
-        await query.message.edit_text(f"❌ **Annonce {annonce_id} rejetée et masquée.**")
+        await query.message.edit_text(f"❌ **Annonce refusée et supprimée.**")
         
         try:
             await ctx.bot.send_message(
                 chat_id=vendeur_id,
-                text=f"⚠️ **Votre annonce pour {annonce['categorie']} a été refusée** car elle ne respecte pas nos règles de publication.",
+                text=f"⚠️ **Votre annonce pour {annonce['categorie']} a été refusée** car elle ne remplit pas nos conditions de modération.",
                 parse_mode="Markdown"
             )
-        except Exception:
-            pass
+        except Exception: pass
