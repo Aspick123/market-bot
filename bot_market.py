@@ -387,6 +387,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"❌ Erreur : {str(e)}")
 
 def main():
+async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["vente_categorie"] = update.message.text.strip()
+    # On appelle proprement la fonction suivante pour ne pas laisser cette fonction vide !
+    return await afficher_choix_specificites(update.message.reply_text, ctx)
 async def afficher_choix_specificites(reply_func, ctx):
     choix = ctx.user_data.get("specs_choisies", [])
     
