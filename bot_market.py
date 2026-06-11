@@ -256,7 +256,7 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.clear()
         await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
-        async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
         await query.answer()
