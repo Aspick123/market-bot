@@ -98,16 +98,30 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👇 **Sélectionnez une option ci-dessous :**"
     )
     
+    # Récupération des boutons du menu principal
     reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
     
+    # Injection dynamique du bouton "Liste des offres" sous le bouton Recherche Flash
+    # On parcourt le clavier existant pour placer notre nouveau bouton de catalogue
+    boutons_modifies = []
+    for ligne in reply_markup.inline_keyboard:
+        boutons_modifies.append(ligne)
+        # Si la ligne contient le bouton de recherche, on ajoute la liste des offres juste en dessous
+        for bouton in ligne:
+            if "recherche" in bouton.callback_data:
+                boutons_modifies.append([InlineKeyboardButton("📋 Parcourir toutes les offres", callback_data="menu:liste_offres")])
+                break
+
+    reply_markup_modifie = InlineKeyboardMarkup(boutons_modifies)
+    
     if update.callback_query:
-        await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup_modifie, parse_mode="Markdown")
     else:
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup_modifie, parse_mode="Markdown")
     
     return ConversationHandler.END
 
-# ==================== LOGIQUE DU MODULE RECHERCHE FLASH (OUI / NON) ====================
+# ==================== LOGIQUE DE LA RECHERCHE FLASH ====================
 
 async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -123,38 +137,13 @@ async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     jeu_recherche = update.message.text.strip()
     
-    # Recherche d'une annonce valide correspondante
     annonce = db.annonces.find_one({
         "categorie": {"$regex": f"^{jeu_recherche}$", "$options": "i"},
         "statut": "valide"
     })
     
     if annonce:
-        vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
-        username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
-        paiements = ", ".join(annonce.get("paiements", []))
-        
-        reponse_oui = (
-            "🟢 **OUI ! Une annonce est disponible !**\n"
-            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"🎮 **Jeu :** `{annonce['categorie']}`\n"
-            f"💻 **Plateforme :** `{annonce.get('plateforme', 'Non spécifiée')}`\n"
-            f"💰 **Prix :** `{annonce['prix']} {annonce['devise']}`\n"
-            f"💳 **Paiements acceptés :** `{paiements}`\n"
-            f"📝 **Description :**\n{annonce['description']}\n"
-            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"👤 **Vendeur :** @{username_vendeur}\n\n"
-            "💡 *Conseil : Utilisez le bouton bleu ci-dessous pour discuter directement avec le vendeur. Si vous vous mettez d'accord, demandez l'arbitrage pour sécuriser la transaction.*"
-        )
-        
-        # Boutons d'interactions directes acheteur -> vendeur / gérant
-        kb = [
-            [InlineKeyboardButton("💬 Contacter le Vendeur", url=f"https://t.me/{username_vendeur}")],
-            [InlineKeyboardButton("⚡ Sécuriser via un Gérant (Arbitrage)", callback_data=f"achat:arbitrage:{annonce['_id']}")],
-            [InlineKeyboardButton("🔙 Retour au Menu Principal", callback_data="menu:retour_start")]
-        ]
-        
-        await update.message.reply_text(reponse_oui, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await afficher_une_annonce(update.message.reply_text, annonce)
     else:
         reponse_non = (
             "🔴 **NON. Aucune annonce disponible.**\n\n"
@@ -163,6 +152,32 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reponse_non, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         
     return ConversationHandler.END
+
+# Fonction utilitaire pour mettre en forme l'affichage complet d'une offre
+async def afficher_une_annonce(reply_func, annonce):
+    vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
+    username_vendeur = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
+    paiements = ", ".join(annonce.get("paiements", []))
+    
+    texte_offre = (
+        "🟢 **OFFRE DISPONIBLE !**\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"🎮 **Jeu :** `{annonce['categorie']}`\n"
+        f"💻 **Plateforme :** `{annonce.get('plateforme', 'Non spécifiée')}`\n"
+        f"💰 **Prix :** `{annonce['prix']} {annonce['devise']}`\n"
+        f"💳 **Paiements acceptés :** `{paiements}`\n"
+        f"📝 **Description :**\n{annonce['description']}\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"👤 **Vendeur :** @{username_vendeur}\n\n"
+        "💡 *Conseil : Utilisez le bouton ci-dessous pour contacter le vendeur. Si vous êtes d'accord, demandez l'arbitrage d'un gérant.*"
+    )
+    
+    kb = [
+        [InlineKeyboardButton("💬 Contacter le Vendeur", url=f"https://t.me/{username_vendeur}")],
+        [InlineKeyboardButton("⚡ Sécuriser via un Gérant (Arbitrage)", callback_data=f"achat:arbitrage:{annonce['_id']}")],
+        [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu:retour_start")]
+    ]
+    await reply_func(texte_offre, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
 
 # ==================== LOGIQUE DU MODULE VENTE (TUNNEL) ====================
@@ -360,27 +375,81 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
     uid = update.effective_user.id
 
-    # 🔄 REDIRECTION ET RÈGLAGE DU BOUTON RETOUR MENU PRINCIPAL
+    # 🔄 RETOUR MENU PRINCIPAL
     if data == "menu:retour_start":
         await query.answer()
         await start_command(update, ctx)
         return
 
-    # ⚡ TRANSACTION SÉCURISÉE (DEMANDE D'ARBITRAGE EN DERNIER RECOURS)
+    # 📋 LISTER TOUTES LES OFFRES ACTIVES (CATALOGUE)
+    if data == "menu:liste_offres":
+        await query.answer()
+        # On extrait toutes les annonces valides enregistrées
+        annonces_valides = list(db.annonces.find({"statut": "valide"}))
+        
+        if not annonces_valides:
+            await query.message.edit_text(
+                "📦 **Catalogue des offres**\n\nIl n'y a aucune annonce en ligne pour le moment.",
+                reply_markup=get_back_to_start_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
+        texte_catalogue = (
+            "📋 **LISTE DES OFFRES DISPONIBLES**\n"
+            "Cliquez sur une offre ci-dessous pour voir les détails :\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        )
+        
+        # Génération d'une liste interactive de boutons (un bouton par annonce)
+        kb = []
+        for index, anc in enumerate(annonces_valides):
+            nom_jeu = anc.get("categorie", "Jeu Inconnu")
+            prix = anc.get("prix", "??")
+            devise = anc.get("devise", "FCFA")
+            
+            # Format textuel de chaque bouton : ex : "1. Genshin Impact - 15000 FCFA"
+            btn_label = f"{index + 1}. {nom_jeu} — {prix} {devise}"
+            kb.append([InlineKeyboardButton(btn_label, callback_data=f"voir_offre:{anc['_id']}")])
+            
+        kb.append([InlineKeyboardButton("🔙 Retour au Menu", callback_data="menu:retour_start")])
+        
+        await query.message.edit_text(
+            texte_catalogue,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+        return
+
+    # 🔍 VOIR LE DÉTAIL D'UNE OFFRE SÉLECTIONNÉE DANS LA LISTE
+    if data.startswith("voir_offre:"):
+        await query.answer()
+        annonce_id = data.split(":")[1]
+        annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+        
+        if not annonce:
+            await query.message.edit_text("❌ Cette offre n'est plus en ligne.", reply_markup=get_back_to_start_keyboard())
+            return
+            
+        # Suppression de l'ancien message de la liste pour afficher l'offre de manière propre
+        await query.message.delete()
+        await afficher_une_annonce(query.message.reply_text, annonce)
+        return
+
+    # ⚡ ARBITRAGE (DERNIER RECOURS)
     if data.startswith("achat:arbitrage:"):
         await query.answer()
         annonce_id = data.split(":")[2]
         
         annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
         if not annonce:
-            await query.message.reply_text("❌ Cette annonce n'est plus disponible ou a été retirée.")
+            await query.message.reply_text("❌ Cette annonce n'est plus disponible.")
             return
             
         vendeur_id = annonce["vendeur_id"]
         vendeur_data = db.users.find_one({"_id": vendeur_id})
         username_vendeur = vendeur_data.get("username", "Inconnu") if vendeur_data else "Inconnu"
         
-        # 1. Message de confirmation immédiat à l'acheteur
         await query.message.reply_text(
             "⏳ **Demande d'arbitrage transmise !**\n\n"
             "Un Gérant Arbitre vient d'être mis au courant pour sécuriser votre transaction.\n"
@@ -388,7 +457,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # 2. Alerte envoyée au Super Admin (Gérant de la plateforme)
         ticket_arbitrage = (
             "🚨 **NOUVELLE DEMANDE D'ARBITRAGE (TRANSACTION)**\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -400,11 +468,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         
         try:
-            await ctx.bot.send_message(
-                chat_id=SUPER_ADMIN_ID,
-                text=ticket_arbitrage,
-                parse_mode="Markdown"
-            )
+            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=ticket_arbitrage, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Impossible d'alerter l'admin pour arbitrage : {e}")
         return
@@ -490,7 +554,6 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # 1. Gestionnaire de Conversation : Vente
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
@@ -509,7 +572,6 @@ def main():
         allow_reentry=True
     )
     
-    # 2. Gestionnaire de Conversation : Recherche Flash
     recherche_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_recherche, pattern=".*recherche.*")],
         states={
@@ -524,7 +586,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Marketplace Bot entièrement configuré avec Tunnel d'Arbitrage !")
+    logger.info("🚀 Bot en ligne avec l'option Catalogue / Liste de toutes les offres !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
