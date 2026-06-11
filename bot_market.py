@@ -277,24 +277,16 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     plateforme = ctx.user_data.get("vente_plateforme", "Non spécifiée")
     description = ctx.user_data.get("vente_description", "Aucune description")
     
-    # 2. Traduction de la plateforme pour l'affichage propre
-    noms_plateformes = {
-        "Android": "📱 Android",
-        "iOS": "🍏 iOS (Apple)",
-        "PC": "💻 PC",
-        "Console": "🎮 Console (PS/Xbox/Switch)",
-        "Multi": "🌐 Multiplateforme"
-    }
-    plateforme_propre = noms_plateformes.get(plateforme, plateforme)
-
-    # 3. Construction du texte récapitulatif mis à jour
+        # Construction du texte récapitulatif mis à jour
     texte = (
         "✨ **RÉCAPITULATIF DE VOTRE OFFRE** ✨\n\n"
         f"🎮 **Jeu :** {jeu}\n"
         f"🔌 **Plateforme :** {plateforme_propre}\n"
         f"📝 **Description :** {description}\n"
     )
-            await query.message.edit_text(profil_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+
+    # Affichage du récapitulatif (alignement corrigé sans le "else:" inutile)
+    await query.message.edit_text(texte, reply_markup=get_confirmation_keyboard(), parse_mode="Markdown")
             
         elif data == "menu:cgu":
             cgu_text = (
