@@ -295,6 +295,7 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎮 **Jeu :** {jeu}\n"
         f"🔌 **Plateforme :** {plateforme_propre}\n"
         f"📝 **Description :** {description}\n"
+    )
             await query.message.edit_text(profil_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
             
         elif data == "menu:cgu":
