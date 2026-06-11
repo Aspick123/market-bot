@@ -265,32 +265,35 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from database_market import is_mode_urgence, db
     query = update.callback_query
     uid = update.effective_user.id
-    data = query.data
-    await query.answer()
-    
-    if is_mode_urgence() and uid != SUPER_ADMIN_ID:
+        # Remplace les lignes 268 à 271 par ceci :
+    choix = ctx.user_data.get("specs_choisies", [])
+    valeurs = ctx.user_data.get("specs_valeurs", {})
         await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
         return
         
     if is_flooded(uid): return
 
-    logger.info(f"Bouton cliqué : {data} par {uid}")
+        # 1. On récupère les données stockées
+    jeu = ctx.user_data.get("vente_jeu", "Inconnu")
+    plateforme = ctx.user_data.get("vente_plateforme", "Non spécifiée")
+    description = ctx.user_data.get("vente_description", "Aucune description")
+    
+    # 2. Traduction de la plateforme pour l'affichage propre
+    noms_plateformes = {
+        "Android": "📱 Android",
+        "iOS": "🍏 iOS (Apple)",
+        "PC": "💻 PC",
+        "Console": "🎮 Console (PS/Xbox/Switch)",
+        "Multi": "🌐 Multiplateforme"
+    }
+    plateforme_propre = noms_plateformes.get(plateforme, plateforme)
 
-    try:
-        if data == "menu:retour_start":
-            await start_command(update, ctx)
-            
-        elif data == "menu:profil":
-            user_data = get_user(uid)
-            profil_text = (
-                f"👤 **Mon Profil Utilisateur**\n\n"
-                f"🆔 **ID Telegram :** `{uid}`\n"
-                f"🏷️ **Nom :** @{user_data.get('username')}\n"
-                f"🎖️ **Statut :** {get_role_label(uid, SUPER_ADMIN_ID)}\n"
-                f"📈 **Niveau :** {user_data.get('niveau', 1)} ({user_data.get('xp', 0)} XP)\n"
-                f"🤝 **Filleuls parrainés :** {user_data.get('parrains', 0)}\n"
-                f"📜 **Statut CGU :** {'✅ Acceptées' if user_data.get('accepte_cgu') else '❌ Non acceptées'}"
-            )
+    # 3. Construction du texte récapitulatif mis à jour
+    texte = (
+        "✨ **RÉCAPITULATIF DE VOTRE OFFRE** ✨\n\n"
+        f"🎮 **Jeu :** {jeu}\n"
+        f"🔌 **Plateforme :** {plateforme_propre}\n"
+        f"📝 **Description :** {description}\n"
             await query.message.edit_text(profil_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
             
         elif data == "menu:cgu":
