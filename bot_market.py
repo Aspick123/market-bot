@@ -256,22 +256,23 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.clear()
         await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
-        ctx.user_data.clear()
-        await query.message.edit_text("❌ Création de l'annonce annulée.", reply_markup=get_back_to_start_keyboard())
-    return ConversationHandler.END
-# ---------------- FIN DU MODULE VENTE ----------------
-
-async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    from database_market import is_mode_urgence, db
+        async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid = update.effective_user.id
-        # Remplace les lignes 268 à 271 par ceci :
+    if query:
+        await query.answer()
+
+    # Vérification du mode urgence/maintenance
+    from database_market import db
+    config = db.config.find_one({"_id": "mode_urgence"})
+    
+    if config and config.get("actif", False):
+        if query:
+            await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
+        return
+
+    # Initialisation des variables pour le récapitulatif
     choix = ctx.user_data.get("specs_choisies", [])
     valeurs = ctx.user_data.get("specs_valeurs", {})
-        await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
-        return
-        
-    if is_flooded(uid): return
 
         # 1. On récupère les données stockées
     jeu = ctx.user_data.get("vente_jeu", "Inconnu")
