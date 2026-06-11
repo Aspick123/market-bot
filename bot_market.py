@@ -251,11 +251,12 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         desc = ctx.user_data.get("vente_description")
         prix = ctx.user_data.get("vente_prix")
         from database_market import create_annonce
-        annonce_id = create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
-        texte_succes = f"🎉 **Félicitations ! Annonce publiée !**\n\n🆔 ID unique : `{annonce_id}`\nVotre compte est bien enregistré."
-        ctx.user_data.clear()
-        await query.message.edit_text(texte_succes, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
-    else:
+        else:
+        # Si ce n'est pas "Genshin", on passe directement à la suite
+        pass
+
+    return CONFIRMATION
+
 async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
