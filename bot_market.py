@@ -25,10 +25,22 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
-# États de la conversation pour la création d'une annonce
-CHOIX_CATEGORIE, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION = range(4)
-ATTENTE_AUTRE_JEU, CHOIX_PAIEMENT, CHOIX_DEVISE = range(4, 7)
-ATTENTE_AUTRE_JEU, CHOIX_PAIEMENT = range(4, 6)
+# États de la conversation pour la création d'une annonce (Tunnel Avancé)
+(
+    CHOIX_CATEGORIE,
+    ATTENTE_AUTRE_JEU,
+    CHOIX_SPECIFICITES,
+    ATTENTE_VALEURS_SPECS,
+    ATTENTE_PHOTOS,
+    ATTENTE_DESCRIPTION,
+    CHOIX_DEVISE,
+    ATTENTE_AUTRE_DEVISE,
+    ATTENTE_PRIX,
+    CHOIX_CRYPTO,
+    ATTENTE_CONTACT,
+    ATTENTE_DISPO,
+    CONFIRMATION
+) = range(13)
 
 app = Flask("")
 
