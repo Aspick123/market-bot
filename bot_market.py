@@ -29,7 +29,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 (
     CHOIX_CATEGORIE,
     ATTENTE_AUTRE_JEU,
-    CHOIX_PLATEFORME,      # Elle doit être présente ici
+    CHOIX_PLATEFORME,
     CHOIX_SPECIFICITES,
     ATTENTE_VALEURS_SPECS,
     ATTENTE_PHOTOS,
@@ -41,7 +41,9 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
     ATTENTE_CONTACT,
     ATTENTE_DISPO,
     CONFIRMATION
-) = range(14)              # On l'augmente à 14
+) = range(14)
+
+CHOIX_PAIEMENT = 99  # État temporaire pour la gestion des paiements
 
 app = Flask("")
 
@@ -100,18 +102,15 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- LOGIQUE DU MODULE VENTE ----------------
 
-# Modifie la fonction debut_vente pour ajouter le bouton "Autre"
 async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # On nettoie la mémoire et on prépare les tiroirs pour la suite
     ctx.user_data.clear()
     ctx.user_data["specs_choisies"] = []
     ctx.user_data["specs_valeurs"] = {}
     ctx.user_data["photos"] = []
     
-    # On demande directement d'écrire le nom du jeu
     await query.message.edit_text(
         "🎮 **Étape 1 : Quel est le jeu concerné ?**\n\n"
         "Veuillez écrire et envoyer le **nom exact** du jeu vidéo (ex: *Genshin Impact, eFootball, Brawl Stars...*).",
@@ -119,11 +118,9 @@ async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ATTENTE_AUTRE_JEU
 
-
 async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_description"] = update.message.text
     
-    # Nouvelle transition : On propose d'abord de choisir la devise
     kb = [
         [InlineKeyboardButton("💵 FCFA (XOF)", callback_data="devise:FCFA")],
         [InlineKeyboardButton("💵 Dollar ($)", callback_data="devise:USD")],
@@ -135,12 +132,11 @@ async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
-    return ATTENTE_PRIX  # On réutilise le même état, mais on intercepte d'abord le callback
+    return ATTENTE_PRIX
 
 async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # 1. Si c'est le clic sur la devise
     if query and query.data.startswith("devise:"):
         await query.answer()
         choix_devise = query.data.split(":")[1]
@@ -154,7 +150,6 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ATTENTE_PRIX
 
-    # 2. Si c'est le texte contenant le montant numérique
     if update.message:
         texte_prix = update.message.text.strip()
         if not texte_prix.isdigit():
@@ -164,14 +159,12 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["vente_prix"] = int(texte_prix)
         ctx.user_data["vente_paiements"] = []
         
-        # On passe à l'affichage des moyens de paiement
         return await afficher_choix_paiement(update.message.reply_text, ctx)
 
 async def afficher_choix_paiement(reply_func, ctx):
     choix = ctx.user_data.get("vente_paiements", [])
     check = lambda m: "☑️" if m in choix else "⬜"
     
-    # Nettoyage complet des parenthèses comme demandé 
     kb = [
         [InlineKeyboardButton(f"{check('FCFA')} 💵 FCFA", callback_data="pay:FCFA")],
         [InlineKeyboardButton(f"{check('USDT')} 🪙 USDT (Binance TRC20)", callback_data="pay:USDT")],
@@ -201,9 +194,9 @@ async def paiement_choisi_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await query.message.edit_text("⚠️ Vous devez sélectionner au moins un moyen de paiement.", reply_markup=InlineKeyboardMarkup(kb))
             return CHOIX_PAIEMENT
             
-        cat = ctx.user_data["vente_categorie"]
-        desc = ctx.user_data["vente_description"]
-        prix = ctx.user_data["vente_prix"]
+        cat = ctx.user_data.get("vente_jeu", "Inconnu")
+        desc = ctx.user_data.get("vente_description", "Aucune description")
+        prix = ctx.user_data.get("vente_prix", 0)
         devise = ctx.user_data.get("vente_devise", "XOF")
         methodes = ", ".join(choix)
         
@@ -247,64 +240,42 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = query.from_user.id
     if query.data == "publier:oui":
-        cat = ctx.user_data.get("vente_categorie")
+        cat = ctx.user_data.get("vente_jeu")
         desc = ctx.user_data.get("vente_description")
         prix = ctx.user_data.get("vente_prix")
-        from database_market import create_annonce
-
+        create_annonce(vendeur_id=uid, categorie=cat, description=desc, prix=prix)
     return CONFIRMATION
 
-async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
+# ---------------- GESTIONNAIRE GLOBAL DES BOUTONS MENUS ----------------
 
-    # Vérification du mode urgence/maintenance
+async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    uid = update.effective_user.id
+
     from database_market import db
     config = db.config.find_one({"_id": "mode_urgence"})
     
-    if config and config.get("actif", False):
-        if query:
-            await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
+    if config and config.get("actif", False) and uid != SUPER_ADMIN_ID:
+        await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
         return
 
-    # Initialisation des variables pour le récapitulatif
-    choix = ctx.user_data.get("specs_choisies", [])
-    valeurs = ctx.user_data.get("specs_valeurs", {})
+    try:
+        if data == "menu:cgu":
+            cgu_text = (
+                "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
+                "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
+                "2. Les transactions doivent respecter le système d'arbitrage sécurisé du bot.\n"
+                "3. La plateforme décline toute responsabilité hors du système d'arbitrage."
+            )
+            await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
 
-        # 1. On récupère les données stockées
-    jeu = ctx.user_data.get("vente_jeu", "Inconnu")
-    plateforme = ctx.user_data.get("vente_plateforme", "Non spécifiée")
-    description = ctx.user_data.get("vente_description", "Aucune description")
-    
-        # Construction du texte récapitulatif mis à jour
-    texte = (
-        "✨ **RÉCAPITULATIF DE VOTRE OFFRE** ✨\n\n"
-        f"🎮 **Jeu :** {jeu}\n"
-        f"🔌 **Plateforme :** {plateforme_propre}\n"
-        f"📝 **Description :** {description}\n"
-    )
-
-        # Affichage du récapitulatif
-    await query.message.edit_text(texte, reply_markup=get_confirmation_keyboard(), parse_mode="Markdown")
-
-    # Alignement corrigé pour la suite des conditions
-    elif
-        cgu_text = (
-            "📜 **Conditions Générales d'Utilisation (CGU)**\n\n"
-            "1. Tout acte de fraude entraînera un bannissement irrévocable.\n"
-            "2. Les transactions doivent respecter le système d'arbitrage sécurisé du bot.\n"
-            "3. La plateforme décline toute responsabilité hors du système d'arbitrage."
-        )
-        await query.message.edit_text(cgu_text, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
-
-            
         elif data == "menu:admin_panel":
             if uid != SUPER_ADMIN_ID:
                 await query.message.edit_text("⛔ Accès refusé. Vous n'êtes pas administrateur.", reply_markup=get_back_to_start_keyboard())
                 return
                 
-            # Récupération des statistiques réelles dans MongoDB
             total_users = db.users.count_documents({}) if hasattr(db, 'users') else 0
             total_annonces = db.annonces.count_documents({}) if hasattr(db, 'annonces') else 0
             statut_urgence = "🚨 ACTIF (Maintenance)" if is_mode_urgence() else "✅ INACTIF (En ligne)"
@@ -320,7 +291,6 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "Utilisez les boutons ci-dessous pour piloter la plateforme :"
             )
 
-            # Boutons de contrôle
             kb = [
                 [InlineKeyboardButton("🚨 Basculer Mode Urgence", callback_data="admin:toggle_urgence")],
                 [InlineKeyboardButton("🔙 Retour au Menu", callback_data="menu:retour_start")]
@@ -330,8 +300,6 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data == "admin:toggle_urgence":
             if uid != SUPER_ADMIN_ID: return
             
-            from database_market import db
-            # On cherche ou crée la config du mode urgence
             config = db.config.find_one({"_id": "mode_urgence"})
             actuel = config.get("actif", False) if config else False
             nouveau_statut = not actuel
@@ -342,7 +310,6 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton("🔄 Rafraîchir le Panel", callback_data="menu:admin_panel")]]
             await query.message.edit_text(texte_confirmation, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-        # Reste des modules en chantier (sans admin_panel)
         elif data in ["menu:recherche", "menu:mes_annonces", "menu:historique", 
                       "menu:parrainage", "menu:defis", "menu:leaderboard", "menu:litige", 
                       "menu:alertes", "menu:blacklist"]:
@@ -352,16 +319,30 @@ async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_back_to_start_keyboard(),
                 parse_mode="Markdown"
             )
+            
+        elif data == "menu:confirmation_recap":
+            jeu = ctx.user_data.get("vente_jeu", "Inconnu")
+            plateforme = ctx.user_data.get("vente_plateforme", "Non spécifiée")
+            description = ctx.user_data.get("vente_description", "Aucune description")
+            
+            texte = (
+                "✨ **RÉCAPITULATIF DE VOTRE OFFRE** ✨\n\n"
+                f"🎮 **Jeu :** {jeu}\n"
+                f"🔌 **Plateforme :** {plateforme}\n"
+                f"📝 **Description :** {description}\n"
+            )
+            # Ajoute ici ton clavier de confirmation personnalisé si nécessaire
+            await query.message.edit_text(texte, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"Erreur callback {data}: {str(e)}")
         await query.message.reply_text(f"❌ Erreur : {str(e)}")
 
+# ---------------- ETAPES DU TUNNEL AVANCE ----------------
 
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # On enregistre proprement le nom du jeu tapé par l'utilisateur
     ctx.user_data["vente_jeu"] = update.message.text.strip()
     
-    # On prépare les boutons des plateformes
     kb = [
         [InlineKeyboardButton("📱 Android", callback_data="plat:Android")],
         [InlineKeyboardButton("🍏 iOS (Apple)", callback_data="plat:iOS")],
@@ -370,32 +351,29 @@ async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🌐 Multiplateforme (Partout)", callback_data="plat:Multi")]
     ]
     
-                "🎮 **Sur quelle plateforme se trouve votre compte ?**\n\n"
+    await update.message.reply_text(
+        "🎮 **Sur quelle plateforme se trouve votre compte ?**\n\n"
         "Sélectionnez le support principal de votre compte :",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
-
-    # On redirige vers notre nouvel état intermédiaire
     return CHOIX_PLATEFORME
 
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
+async def afficher_choix_specificites(reply_func, ctx):
+    choix = ctx.user_data.get("specs_choisies", [])
+    specs_disponibles = [
+        ("👥 Personnages", "spec:Persos"),
+        ("👕 Skins", "spec:Skins"),
+        ("⚔️ Armes", "spec:Armes"),
+        ("🔮 Objets Rares", "spec:Objets")
+    ]
     
-
-    # On redirige vers notre nouvel état intermédiaire
-    return CHOIX_PLATEFORME
-
-
-kb = []
-for nom, callback in specs_disponibles:
-    
+    kb = []
+    for nom, callback in specs_disponibles:
         id_spec = callback.replace("spec:", "")
-        # Si la caractéristique est déjà cochée, on met un carré plein, sinon un carré vide
         check = "☑️" if id_spec in choix else "⬜"
         kb.append([InlineKeyboardButton(f"{check} {nom}", callback_data=callback)])
         
-    # Bouton de validation final
     kb.append([InlineKeyboardButton("✅ Valider la sélection", callback_data="spec:valider")])
     
     await reply_func(
@@ -414,10 +392,8 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
     
     choix = ctx.user_data.get("specs_choisies", [])
     
-    # 1. Si l'utilisateur clique TRÈS PRÉCISÉMENT sur le bouton de validation
     if data == "spec:valider":
         if not choix:
-            # Si aucune case n'est cochée, on passe direct aux photos
             await query.message.edit_text(
                 "📸 **Étape 3 : Preuves en images**\n\n"
                 "Veuillez envoyer entre **1 et 5 photos** de votre compte (captures d'écran).\n\n"
@@ -426,12 +402,10 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
             )
             return ATTENTE_PHOTOS
             
-        # Si des cases sont cochées, on démarre la boucle des nombres
         ctx.user_data["index_spec_actuelle"] = 0
         premiere_spec = choix[0]
         
-        # Traduction propre pour l'affichage à l'utilisateur
-        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Artefacts": "Artefacts", "Objets": "Objets Rares"}
+        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Objets": "Objets Rares"}
         nom_propre = noms_affichage.get(premiere_spec, premiere_spec)
         
         await query.message.edit_text(
@@ -442,7 +416,6 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
         )
         return ATTENTE_VALEURS_SPECS
 
-    # 2. Si l'utilisateur clique sur une case (Persos, Skins, etc.)
     id_spec = data.replace("spec:", "")
     if id_spec in choix:
         choix.remove(id_spec)
@@ -451,25 +424,6 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
         
     ctx.user_data["specs_choisies"] = choix
     return await afficher_choix_specificites(query.message.edit_reply_markup, ctx)
-async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-
-    # Vérification du mode urgence/maintenance
-    from database_market import db
-    config = db.config.find_one({"_id": "mode_urgence"})
-    
-    if config and config.get("actif", False):
-        if query:
-            await query.message.edit_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
-        return
-
-    # Initialisation des variables pour le récapitulatif
-    choix = ctx.user_data.get("specs_choisies", [])
-    valeurs = ctx.user_data.get("specs_valeurs", {})
-
-    
 
 async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte = update.message.text.strip()
@@ -481,17 +435,15 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     choix = ctx.user_data.get("specs_choisies", [])
     index = ctx.user_data.get("index_spec_actuelle", 0)
     
-    # Enregistrement de la valeur pour la spec actuelle
     spec_actuelle = choix[index]
     ctx.user_data["specs_valeurs"][spec_actuelle] = int(texte)
     
-    # Passage à la caractéristique suivante s'il y en a une
     index += 1
     ctx.user_data["index_spec_actuelle"] = index
     
     if index < len(choix):
         prochaine_spec = choix[index]
-        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Artefacts": "Artefacts", "Objets": "Objets Rares"}
+        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Objets": "Objets Rares"}
         nom_propre = noms_affichage.get(prochaine_spec, prochaine_spec)
         
         await update.message.reply_text(
@@ -501,7 +453,6 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ATTENTE_VALEURS_SPECS
     else:
-        # Si toutes les quantités sont remplies, on passe aux photos !
         await update.message.reply_text(
             "📸 **Étape 3 : Preuves en images**\n\n"
             "Veuillez envoyer entre **1 et 5 photos** de votre compte (captures d'écran).\n\n"
@@ -509,19 +460,60 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return ATTENTE_PHOTOS
-        
-# Mettre la fonction complètement en dehors de main() (alignée tout à gauche)
+
 async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # On récupère la plateforme sélectionnée
     plateforme = query.data.replace("plat:", "")
     ctx.user_data["vente_plateforme"] = plateforme
     
-    # On passe enfin à l'affichage des cases à cocher
     return await afficher_choix_specificites(query.message.edit_text, ctx)
 
+# ---------------- FONCTIONS DE TRANSITION OBLIGATOIRES POUR LE CONVERSATIONHANDLER ----------------
+
+async def photos_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        photo_id = update.message.photo[-1].file_id
+        if "photos" not in ctx.user_data:
+            ctx.user_data["photos"] = []
+        if len(ctx.user_data["photos"]) < 5:
+            ctx.user_data["photos"].append(photo_id)
+            await update.message.reply_text(f"📸 Image reçue ({len(ctx.user_data['photos'])}/5). Envoyez-en d'autres ou écrivez 'FIN'.")
+        else:
+            await update.message.reply_text("⚠️ Limite de 5 photos atteinte. Écrivez 'FIN' pour continuer.")
+        return ATTENTE_PHOTOS
+        
+    if update.message.text and update.message.text.upper() == "FIN":
+        await update.message.reply_text("📝 **Veuillez entrer une description détaillée pour votre compte :**")
+        return ATTENTE_DESCRIPTION
+    return ATTENTE_PHOTOS
+
+async def devise_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ctx.user_data["vente_devise"] = query.data.replace("devise:", "")
+    await query.message.edit_text("💰 Entrez le prix en chiffres uniquement :")
+    return ATTENTE_PRIX
+
+async def autre_devise_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["vente_devise"] = update.message.text.strip().upper()
+    await update.message.reply_text("💰 Entrez le prix en chiffres uniquement :")
+    return ATTENTE_PRIX
+
+async def crypto_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return ATTENTE_CONTACT
+
+async def contact_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return ATTENTE_DISPO
+
+async def dispo_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return CONFIRMATION
+
+async def confirmation_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return ConversationHandler.END
+
+# ---------------- ENTRÉE PRINCIPALE DU PROGRAMME ----------------
 
 def main():
     flask_thread = Thread(target=run_flask, daemon=True)
@@ -532,28 +524,23 @@ def main():
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
         states={
-            # 1. Enregistrement du nom du jeu tapé
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
-            
-            # 2. Enregistrement de la plateforme choisie
             CHOIX_PLATEFORME: [CallbackQueryHandler(plateforme_choisie_handler, pattern="^plat:")],
-            
-            # 3. Menu des cases à cocher
             CHOIX_SPECIFICITES: [CallbackQueryHandler(specificite_choisie_handler, pattern="^spec:")],
-            
-            # 4. Enregistrement des quantités numériques
             ATTENTE_VALEURS_SPECS: [MessageHandler(filters.TEXT & ~filters.COMMAND, valeurs_specs_recues)],
-            
-            # --- Suite et fin logique du tunnel de vente ---
             ATTENTE_PHOTOS: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), photos_recues)],
             ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
             CHOIX_DEVISE: [CallbackQueryHandler(devise_choisie_handler, pattern="^devise:")],
             ATTENTE_AUTRE_DEVISE: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_devise_recue)],
-            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
+            ATTENTE_PRIX: [
+                CallbackQueryHandler(prix_recu, pattern="^devise:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)
+            ],
             CHOIX_CRYPTO: [CallbackQueryHandler(crypto_choisie_handler, pattern="^crypto:")],
             ATTENTE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_recu)],
             ATTENTE_DISPO: [MessageHandler(filters.TEXT & ~filters.COMMAND, dispo_recue)],
-            CONFIRMATION: [CallbackQueryHandler(confirmation_handler, pattern="^(publier:|annuler$)")]
+            CONFIRMATION: [CallbackQueryHandler(confirmation_handler, pattern="^(publier:|annuler$)")],
+            CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")]
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
@@ -568,4 +555,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
