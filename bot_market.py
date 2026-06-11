@@ -26,10 +26,6 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
-# --- IMPORTS DE NOS AUTRES MODULES ---
-from moderation import soumettre_a_la_moderation, traitement_moderation
-from profil import afficher_profil, gestion_candidature
-
 # États de la conversation globale
 (
     CHOIX_CATEGORIE,
@@ -52,6 +48,7 @@ from profil import afficher_profil, gestion_candidature
 # États additionnels hors tunnel de vente de base
 ATTENTE_RECHERCHE_JEU = 99
 ATTENTE_MODIF_PRIX = 100
+ATTENTE_MODIF_DESC = 101  # <-- Nouvel état pour la modification de la description
 
 app = Flask("")
 
@@ -312,6 +309,18 @@ async def executer_modification_prix(update: Update, ctx: ContextTypes.DEFAULT_T
         
     return ConversationHandler.END
 
+async def executer_modification_description(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    nouvelle_desc = update.message.text.strip()
+    annonce_id = ctx.user_data.get("modif_annonce_id")
+    
+    if annonce_id:
+        db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"description": nouvelle_desc}})
+        await update.message.reply_text("✅ **La description de votre annonce a été modifiée avec succès !**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Une erreur est survenue.", reply_markup=get_back_to_start_keyboard())
+        
+    return ConversationHandler.END
+
 
 # ==================== AIGUILLAGE CENTRAL DES BOUTONS MENUS ====================
 
@@ -372,12 +381,14 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not anc: return
         
         texte_gestion = (
-            f"⚙️ **Gestion de votre annonce : {anc['categorie']}**\n"
-            f"Prix actuel : `{anc['prix']} {anc['devise']}`\n\n"
+            f"⚙️ **Gestion de votre annonce : {anc['categorie']}**\n\n"
+            f"💰 **Prix actuel :** `{anc['prix']} {anc['devise']}`\n"
+            f"📝 **Description actuelle :**\n{anc['description']}\n\n"
             "Que désirez-vous faire avec cette offre ?"
         )
         kb = [
             [InlineKeyboardButton("💰 Modifier le Prix", callback_data=f"mon_annonce:modif_prix:{aid}")],
+            [InlineKeyboardButton("📝 Modifier la Description", callback_data=f"mon_annonce:modif_desc:{aid}")],
             [InlineKeyboardButton("❌ Supprimer l'annonce", callback_data=f"mon_annonce:suppr:{aid}")],
             [InlineKeyboardButton("🔙 Annuler", callback_data="menu:mes_annonces")]
         ]
@@ -395,6 +406,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["modif_annonce_id"] = data.split(":")[2]
         await query.message.edit_text("💰 **Entrez le nouveau prix de vente (chiffres uniquement) :**", parse_mode="Markdown")
         return ATTENTE_MODIF_PRIX
+
+    if data.startswith("mon_annonce:modif_desc:"):
+        await query.answer()
+        ctx.user_data["modif_annonce_id"] = data.split(":")[2]
+        await query.message.edit_text("📝 **Envoyez votre nouvelle description détaillée pour cette annonce :**", parse_mode="Markdown")
+        return ATTENTE_MODIF_DESC
 
     # ⚡ ARBITRAGE
     if data.startswith("achat:arbitrage:"):
@@ -452,11 +469,12 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # Intégration de la modification de prix et gestion globale
+    # Intégration de la modification de prix, description et gestion globale
     vente_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(debut_vente, pattern="^menu:vendre$"),
-            CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_prix:") # Déclencheur du bouton modif prix
+            CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_prix:"),
+            CallbackQueryHandler(button_handler, pattern="^mon_annonce:modif_desc:") # Déclencheur du bouton modif desc
         ],
         states={
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
@@ -466,7 +484,8 @@ def main():
             ATTENTE_PRIX: [CallbackQueryHandler(prix_recu, pattern="^devise:"), MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
             CHOIX_PAIEMENT: [CallbackQueryHandler(paiement_choisi_handler, pattern="^pay:")],
             CONFIRMATION: [CallbackQueryHandler(confirmation_finale, pattern="^publier:")],
-            ATTENTE_MODIF_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_prix)] # Capturer le nouveau prix
+            ATTENTE_MODIF_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_prix)],
+            ATTENTE_MODIF_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, executer_modification_description)] # Capturer le nouveau texte
         },
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
         allow_reentry=True
@@ -484,7 +503,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🚀 Marketplace Bot mis à jour (Mes Annonces : Modif / Suppr) !")
+    logger.info("🚀 Marketplace Bot mis à jour (Modif Description Active) !")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
