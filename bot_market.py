@@ -103,20 +103,20 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    # On nettoie la mémoire et on prépare les tiroirs pour la suite
     ctx.user_data.clear()
-    kb = [
-        [InlineKeyboardButton("⚽ eFootball Mobile", callback_data="cat:efootball")],
-        [InlineKeyboardButton("✨ Genshin Impact", callback_data="cat:genshin")],
-        [InlineKeyboardButton("⭐ Brawl Stars", callback_data="cat:brawl_stars")],
-        [InlineKeyboardButton("➕ Autre Jeu", callback_data="cat:autre")],
-        [InlineKeyboardButton("🔙 Annuler", callback_data="menu:retour_start")]
-    ]
+    ctx.user_data["specs_choisies"] = []
+    ctx.user_data["specs_valeurs"] = {}
+    ctx.user_data["photos"] = []
+    
+    # On demande directement d'écrire le nom du jeu
     await query.message.edit_text(
-        "📦 **Étape 1 : Choix du jeu**\n\nQuel type de compte souhaitez-vous mettre en vente ?",
-        reply_markup=InlineKeyboardMarkup(kb),
+        "🎮 **Étape 1 : Quel est le jeu concerné ?**\n\n"
+        "Veuillez écrire et envoyer le **nom exact** du jeu vidéo (ex: *Genshin Impact, eFootball, Brawl Stars...*).",
         parse_mode="Markdown"
     )
-    return CHOIX_CATEGORIE
+    return ATTENTE_AUTRE_JEU
 
 async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -140,12 +140,26 @@ async def categorie_choisie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ATTENTE_DESCRIPTION
 
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["vente_categorie"] = update.message.text.strip()
+    # On enregistre le nom du jeu tapé par l'utilisateur
+    ctx.user_data["vente_jeu"] = update.message.text.strip()
+    
+    # On prépare les boutons des plateformes
+    kb = [
+        [InlineKeyboardButton("📱 Android", callback_data="plat:Android")],
+        [InlineKeyboardButton("🍏 iOS (Apple)", callback_data="plat:iOS")],
+        [InlineKeyboardButton("💻 PC", callback_data="plat:PC")],
+        [InlineKeyboardButton("🎮 Console (PS/Xbox/Switch)", callback_data="plat:Console")],
+        [InlineKeyboardButton("🌐 Multiplateforme (Partout)", callback_data="plat:Multi")]
+    ]
+    
     await update.message.reply_text(
-        f"📝 **Étape 2 : Description de l'offre ({ctx.user_data['vente_categorie']})**\n\nVeuillez envoyer un message contenant les détails de votre compte.",
+        "🔌 **Sur quelle plateforme se trouve votre compte ?**\n\n"
+        "Sélectionnez le support principal de votre compte :",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
-    return ATTENTE_DESCRIPTION
+    # On redirige vers un état intermédiaire (CHOIX_CATEGORIE fera l'affaire pour intercepter le clic)
+    return CHOIX_CATEGORIE
 
 async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_description"] = update.message.text
@@ -429,10 +443,10 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
     
     choix = ctx.user_data.get("specs_choisies", [])
     
-    # Si l'utilisateur clique sur Valider
+    # 1. Si l'utilisateur clique TRÈS PRÉCISÉMENT sur le bouton de validation
     if data == "spec:valider":
         if not choix:
-            # Si rien n'est coché, on passe directement à l'envoi des photos
+            # Si aucune case n'est cochée, on passe direct aux photos
             await query.message.edit_text(
                 "📸 **Étape 3 : Preuves en images**\n\n"
                 "Veuillez envoyer entre **1 et 5 photos** de votre compte (captures d'écran).\n\n"
@@ -441,19 +455,23 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
             )
             return ATTENTE_PHOTOS
             
-        # Sinon, on commence à lui demander les nombres pour la première case cochée
+        # Si des cases sont cochées, on démarre la boucle des nombres
         ctx.user_data["index_spec_actuelle"] = 0
         premiere_spec = choix[0]
         
+        # Traduction propre pour l'affichage à l'utilisateur
+        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Artefacts": "Artefacts", "Objets": "Objets Rares"}
+        nom_propre = noms_affichage.get(premiere_spec, premiere_spec)
+        
         await query.message.edit_text(
             f"🔢 **Configuration des quantités**\n\n"
-            f"Combien de **{premiere_spec}** possédés exacts possédez-vous sur votre compte ?\n"
+            f"Combien de **{nom_propre}** possédez-vous exactement sur votre compte ?\n"
             f"*(Entrez un nombre entier uniquement)*",
             parse_mode="Markdown"
         )
         return ATTENTE_VALEURS_SPECS
 
-    # Gestion de la coche / décoche
+    # 2. Si l'utilisateur clique sur une case (Persos, Skins, etc.)
     id_spec = data.replace("spec:", "")
     if id_spec in choix:
         choix.remove(id_spec)
@@ -462,6 +480,18 @@ async def specificite_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_
         
     ctx.user_data["specs_choisies"] = choix
     return await afficher_choix_specificites(query.message.edit_reply_markup, ctx)
+async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # On récupère la plateforme (ex: "Android", "PC")
+    plateforme = query.data.replace("plat:", "")
+    ctx.user_data["vente_plateforme"] = plateforme
+    
+    # Maintenant que le jeu et la plateforme sont stockés, on ouvre les cases à cocher !
+    return await afficher_choix_specificites(query.message.edit_text, ctx)
+    
+
 async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texte = update.message.text.strip()
     
@@ -482,9 +512,12 @@ async def valeurs_specs_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     if index < len(choix):
         prochaine_spec = choix[index]
+        noms_affichage = {"Persos": "Personnages", "Skins": "Skins", "Armes": "Armes", "Artefacts": "Artefacts", "Objets": "Objets Rares"}
+        nom_propre = noms_affichage.get(prochaine_spec, prochaine_spec)
+        
         await update.message.reply_text(
             f"🔢 **Prochaine quantité**\n\n"
-            f"Combien de **{prochaine_spec}** possédés possédez-vous exacts ?",
+            f"Combien de **{nom_propre}** possédez-vous au total ?",
             parse_mode="Markdown"
         )
         return ATTENTE_VALEURS_SPECS
@@ -506,17 +539,14 @@ def main():
     
     vente_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(debut_vente, pattern="^menu:vendre$")],
-                    states={
-            CHOIX_CATEGORIE: [CallbackQueryHandler(categorie_choisie, pattern="^cat:")],
+                            states={
+            # Désormais, CHOIX_CATEGORIE intercepte le clic sur la plateforme :
+            CHOIX_CATEGORIE: [CallbackQueryHandler(plateforme_choisie_handler, pattern="^plat:")],
             
             ATTENTE_AUTRE_JEU: [MessageHandler(filters.TEXT & ~filters.COMMAND, autre_jeu_recu)],
             
-            # 🔥 INSERE LES DEUX LIGNES ICI (PARFAITEMENT ALIGNÉES) :
             CHOIX_SPECIFICITES: [CallbackQueryHandler(specificite_choisie_handler, pattern="^spec:")],
             ATTENTE_VALEURS_SPECS: [MessageHandler(filters.TEXT & ~filters.COMMAND, valeurs_specs_recues)],
-            
-            ATTENTE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_recue)],
-            ATTENTE_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, prix_recu)],
 
     },
 
