@@ -1,90 +1,135 @@
 import os
 import time
+import logging
 from pymongo import MongoClient
-from collections import defaultdict
+from telegram import Update
+from telegram.ext import ContextTypes
+from telegram.error import TelegramError
 
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+# Configuration des logs
+logger = logging.getLogger(__name__)
+
+# --- CONFIGURATION MONGO DB ---
+# Utilise la variable d'environnement MONGO_URI si elle existe, sinon utilise une base locale
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
 client = MongoClient(MONGO_URI)
-db = client["market_bot_db"]
+db = client["marketplace_database"]
 
-users_col = db["users"]
-config_col = db["config"]
-annonces_col = db["annonces"]
-
-ROLES_EQUIPE = {
-    "super_admin": "👑 Fondateur",
-    "admin": "🛡️ Administrateur",
-    "mod": "⚔️ Modérateur",
-    "user": "👤 Membre"
-}
-
-_flood_store = defaultdict(list)
-
-def is_flooded(uid: int) -> bool:
-    now = time.time()
-    _flood_store[uid] = [t for t in _flood_store[uid] if now - t < 60]
-    _flood_store[uid].append(now)
-    return len(_flood_store[uid]) > 6
-
-def get_user(uid: int) -> dict:
-    user = users_col.find_one({"_id": uid})
-    if not user:
-        user = {
-            "_id": uid,
-            "username": None,
-            "role": "user",
-            "accepte_cgu": False,
-            "xp": 0,
-            "niveau": 1,
-            "parrains": 0,
-            "blacklist": False,
-            "date_inscription": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        users_col.insert_one(user)
-    return user
-
-def save_user(uid: int, data: dict):
-    users_col.update_one({"_id": uid}, {"$set": data})
-
-def get_role_label(uid: int, super_admin_id: int) -> str:
-    if uid == super_admin_id:
-        return ROLES_EQUIPE["super_admin"]
-    user = get_user(uid)
-    return ROLES_EQUIPE.get(user.get("role", "user"), ROLES_EQUIPE["user"])
-
-def has_perm(uid: int, required_role: str, super_admin_id: int) -> bool:
-    if uid == super_admin_id:
-        return True
-    user = get_user(uid)
-    role_hierarchy = {"user": 0, "mod": 1, "admin": 2, "super_admin": 3}
-    user_rank = role_hierarchy.get(user.get("role", "user"), 0)
-    required_rank = role_hierarchy.get(required_role, 0)
-    return user_rank >= required_rank
+# --- GESTION ANTI-FLOOD & MAINTENANCE ---
+# Dictionnaires temporaires en mémoire pour l'anti-flood
+_USER_LAST_REQUEST_TIME = {}
+FLOOD_LIMIT_SECONDS = 2  # Temps minimum entre deux requêtes
 
 def is_mode_urgence() -> bool:
-    cfg = config_col.find_one({"_id": "global_config"})
-    if cfg:
-        return cfg.get("mode_urgence", False)
+    """
+    Vérifie si le mode maintenance/urgence est activé dans la base de données.
+    """
+    config = db.configuration.find_one({"key": "mode_urgence"})
+    if config:
+        return config.get("value", False)
     return False
 
-def create_annonce(vendeur_id: int, categorie: str, description: str, prix: str) -> str:
-    """Enregistre une nouvelle annonce dans la collection MongoDB."""
-    import uuid
-    annonce_id = str(uuid.uuid4())[:8] # Génère un ID unique court à 8 caractères
+def set_mode_urgence(status: bool):
+    """
+    Active ou désactive le mode maintenance/urgence.
+    """
+    db.configuration.update_one(
+        {"key": "mode_urgence"},
+        {"$set": {"value": status}},
+        upsert=True
+    )
+
+def is_flooded(user_id: int) -> bool:
+    """
+    Vérifie si l'utilisateur envoie des requêtes trop rapidement (Anti-Flood).
+    """
+    current_time = time.time()
+    last_time = _USER_LAST_REQUEST_TIME.get(user_id, 0)
     
-    annonce = {
-        "_id": annonce_id,
-        "vendeur_id": vendeur_id,
-        "categorie": categorie,
-        "description": description,
-        "prix": prix,
-        "statut": "disponible", # disponible / vendu / en_litige
-        "date_publication": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    annonces_col.insert_one(annonce)
-    return annonce_id
+    if current_time - last_time < FLOOD_LIMIT_SECONDS:
+        return True
+        
+    _USER_LAST_REQUEST_TIME[user_id] = current_time
+    return False
 
-def get_user_annonces(vendeur_id: int) -> list:
-    """Récupère toutes les annonces publiées par un utilisateur spécifique."""
-    return list(annonces_col.find({"vendeur_id": vendeur_id}))
 
+# --- GESTION DES UTILISATEURS ---
+
+def get_user(user_id: int) -> dict:
+    """
+    Récupère un utilisateur depuis la base de données.
+    S'il n'existe pas, il est automatiquement créé avec un profil par défaut.
+    """
+    user = db.users.find_one({"_id": user_id})
+    if not user:
+        user = {
+            "_id": user_id,
+            "username": None,
+            "role": "vendeur",  # Rôles possibles : vendeur, staff, admin
+            "banni": False,
+            "date_inscription": time.time(),
+            "score_fiabilite": 100,
+            "annonces_publiees": 0
+        }
+        db.users.insert_one(user)
+    return user
+
+def save_user(user_id: int, user_data: dict):
+    """
+    Sauvegarde ou met à jour les données complètes d'un utilisateur.
+    """
+    db.users.update_one({"_id": user_id}, {"$set": user_data}, upsert=True)
+
+def get_role_label(user_id: int, super_admin_id: int) -> str:
+    """
+    Retourne un label textuel et stylisé du rang de l'utilisateur.
+    """
+    if user_id == super_admin_id:
+        return "👑 Fondateur / Super Admin"
+        
+    user = get_user(user_id)
+    if user.get("banni", False):
+        return "❌ Utilisateur Banni"
+        
+    role = user.get("role", "vendeur")
+    if role == "admin":
+        return "🛡️ Administrateur"
+    elif role == "staff":
+        return "👨‍✈️ Gérant / Staff"
+    else:
+        return "🛒 Vendeur Vérifié"
+
+
+# --- 🔐 SYSTÈME DE VÉRIFICATION FORCE JOIN (ABONNEMENT REQUIS) ---
+
+async def verifier_abonnement_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, canal_id: str) -> bool:
+    """
+    Interroge l'API Telegram en temps réel pour vérifier si l'utilisateur est présent
+    dans le canal spécifié.
+    
+    Retourne :
+      - True s'il est membre, administrateur ou créateur.
+      - False s'il a quitté, s'il est exclu ou s'il y a une erreur de configuration.
+    """
+    # Toujours laisser passer les vérifications si l'ID est configuré vide ou invalide pendant les tests
+    if not canal_id or canal_id == "@TonCanalDeVente":
+        logger.warning("Le CANAL_VENTE_ID n'est pas encore configuré correctement. Accès autorisé par défaut.")
+        return True
+
+    try:
+        # Requête directe auprès de l'infrastructure Telegram
+        membre = await ctx.bot.get_chat_member(chat_id=canal_id, user_id=user_id)
+        
+        # Liste des statuts autorisés à utiliser les fonctionnalités du bot
+        statuts_autorises = ["member", "administrator", "creator"]
+        
+        if membre.status in statuts_autorises:
+            return True
+            
+        logger.info(f"Utilisateur {user_id} bloqué : Statut actuel dans le canal : {membre.status}")
+        return False
+        
+    except TelegramError as e:
+        # L'erreur survient généralement si le bot n'est pas Administrateur du canal
+        logger.error(f"Erreur critique lors de la vérification du canal {canal_id} pour l'user {user_id} : {e}")
+        return False
