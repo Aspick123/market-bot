@@ -5,7 +5,7 @@ from threading import Thread
 from flask import Flask
 from bson.objectid import ObjectId
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -27,9 +27,8 @@ from database_market import (
     CANAL_VENTE_ID
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
-from moderation import soumettre_a_la_moderation, traitement_moderation
 
-# États
+# États du tunnel de vente
 (
     CHOIX_CATEGORIE, ATTENTE_AUTRE_JEU, CHOIX_PLATEFORME, 
     ATTENTE_PHOTOS, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION
@@ -41,7 +40,7 @@ app = Flask("")
 
 @app.route("/")
 def home():
-    return "Toutes les options du bot sont opérationnelles !"
+    return "Marketplace opérationnel à 100% !"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -52,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEyKszXM8y_RNVz3XqW5LfV6UlKQtO3jzQ")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", str(SUPER_ADMIN_ID))
 
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -95,9 +95,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👇 **Sélectionnez une option ci-dessous :**"
     )
     
-    # Utilisation du clavier natif complet présent sur la capture
     reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
-    
     if update.callback_query:
         await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
@@ -105,34 +103,136 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ==================== TUNNEL DE VENTE ====================
+# ==================== LOGIQUE DE MODÉRATION ET SOUUMISSION ====================
+
+async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    
+    annonce_data = {
+        "vendeur_id": uid,
+        "categorie": ctx.user_data.get("vente_jeu"),
+        "plateforme": ctx.user_data.get("vente_plateforme"),
+        "photos": ctx.user_data.get("photos", []),
+        "description": ctx.user_data.get("vente_description"),
+        "prix": ctx.user_data.get("vente_prix"),
+        "devise": ctx.user_data.get("vente_devise"),
+        "statut": "en_attente",
+        "date_creation": time.time()
+    }
+    
+    # Enregistrement en Base de données
+    res = db.annonces.insert_one(annonce_data)
+    annonce_id = str(res.inserted_id)
+    
+    # Envoi de la notification de contrôle au Staff/Super Admin
+    txt_mod = (
+        f"🚨 **NOUVELLE ANNONCE À MODÉRER**\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"🆔 **ID Annonce :** `{annonce_id}`\n"
+        f"🎮 **Jeu :** `{annonce_data['categorie']}`\n"
+        f"💻 **Plateforme :** `{annonce_data['plateforme']}`\n"
+        f"💰 **Prix demandé :** `{annonce_data['prix']} {annonce_data['devise']}`\n"
+        f"👤 **ID Vendeur :** `{uid}`\n"
+        f"📝 **Description :**\n{annonce_data['description']}"
+    )
+    kb_mod = [
+        [
+            InlineKeyboardButton("✅ Approuver", callback_data=f"mod:approuver:{annonce_id}"),
+            InlineKeyboardButton("❌ Rejeter", callback_data=f"mod:rejeter:{annonce_id}")
+        ]
+    ]
+    
+    try:
+        if annonce_data["photos"]:
+            await ctx.bot.send_photo(chat_id=MODERATION_CHAT_ID, photo=annonce_data["photos"][0], caption=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
+        else:
+            await ctx.bot.send_message(chat_id=MODERATION_CHAT_ID, text=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Erreur d'envoi à la modération : {e}")
+
+    await update.callback_query.message.edit_text(
+        "✅ **Votre offre a été envoyée avec succès à l'équipe !**\n\nElle sera analysée sous peu. Vous recevrez un message de confirmation automatique dès sa validation.",
+        reply_markup=get_back_to_start_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    await query.answer()
+    
+    _, action, annonce_id = data.split(":")
+    annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+    
+    if not annonce:
+        await query.message.edit_text("❌ Erreur : Cette annonce n'existe plus.")
+        return
+        
+    vendeur_id = annonce["vendeur_id"]
+    
+    if action == "approuver":
+        db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "valide"}})
+        db.users.update_one({"_id": vendeur_id}, {"$inc": {"annonces_publiees": 1}})
+        await query.message.edit_text(f"🟢 Annonce `{annonce_id}` approuvée avec succès.")
+        
+        # Publication automatique sur le canal public
+        try:
+            txt_canal = (
+                f"📢 **COMPTE DISPONIBLE SUR LE MARKETPLACE**\n"
+                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                f"🎮 **Jeu :** {annonce['categorie']}\n"
+                f"💻 **Plateforme :** {annonce['plateforme']}\n"
+                f"💰 **Prix :** {annonce['prix']} {annonce['devise']}\n"
+                f"📝 **Description :**\n{annonce['description']}\n"
+                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                f"🤖 *Pour acheter ce compte en toute sécurité, lancez notre bot officiel.*"
+            )
+            if annonce.get("photos"):
+                await ctx.bot.send_photo(chat_id=CANAL_VENTE_ID, photo=annonce["photos"][0], caption=txt_canal)
+            else:
+                await ctx.bot.send_message(chat_id=CANAL_VENTE_ID, text=txt_canal)
+        except Exception as e:
+            logger.error(f"Échec publication canal : {e}")
+            
+        try:
+            await ctx.bot.send_message(chat_id=vendeur_id, text="🎉 **Félicitations !** Votre annonce a été validée et est maintenant en ligne sur le canal officiel.")
+        except Exception: pass
+
+    elif action == "rejeter":
+        db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "rejete"}})
+        await query.message.edit_text(f"🔴 Annonce `{annonce_id}` refusée.")
+        try:
+            await ctx.bot.send_message(chat_id=vendeur_id, text="❌ Votre annonce a été refusée par l'équipe car elle ne respecte pas nos règles de publication.")
+        except Exception: pass
+
+
+# ==================== TUNNEL DE VENTE (CONVERSATION) ====================
 
 async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await verifier_abonnement_canal(ctx, update.effective_user.id) and update.effective_user.id != SUPER_ADMIN_ID:
-        await update.callback_query.answer("⚠️ Rejoignez le canal pour vendre !", show_alert=True)
+        await update.callback_query.answer("⚠️ Rejoignez d'abord le canal !", show_alert=True)
         return ConversationHandler.END
     query = update.callback_query
     await query.answer()
     ctx.user_data.clear()
     ctx.user_data["photos"] = []
-    await query.message.edit_text("🎮 **Étape 1 : Quel est le jeu vidéo concerné ?**\n\nEnvoyez le nom exact du jeu.", parse_mode="Markdown")
+    await query.message.edit_text("🎮 **Étape 1 : Nom du jeu vidéo ?**\n\nEnvoyez le nom complet par écrit (ex: Genshin Impact) :", parse_mode="Markdown")
     return ATTENTE_AUTRE_JEU
 
 async def autre_jeu_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["vente_jeu"] = update.message.text.strip()
     kb = [
-        [InlineKeyboardButton("📱 Android", callback_data="plat:Android")], [InlineKeyboardButton("🍏 iOS (Apple)", callback_data="plat:iOS")],
-        [InlineKeyboardButton("💻 PC", callback_data="plat:PC")], [InlineKeyboardButton("🎮 Console (PS/Xbox)", callback_data="plat:Console")],
-        [InlineKeyboardButton("🌐 Multiplateforme", callback_data="plat:Multi")]
+        [InlineKeyboardButton("📱 Android", callback_data="plat:Android")], [InlineKeyboardButton("🍏 iOS", callback_data="plat:iOS")],
+        [InlineKeyboardButton("💻 PC", callback_data="plat:PC")], [InlineKeyboardButton("🎮 Console", callback_data="plat:Console")]
     ]
-    await update.message.reply_text("🎮 **Sur quelle plateforme se trouve votre compte ?**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text("🎮 **Sélectionnez la plateforme :**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return CHOIX_PLATEFORME
 
 async def plateforme_choisie_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     ctx.user_data["vente_plateforme"] = query.data.replace("plat:", "")
-    await query.message.edit_text("📸 **Étape 2 : Preuves visuelles**\n\nEnvoyez de 1 à 5 captures d'écran, puis écrivez le mot **'FIN'**.", parse_mode="Markdown")
+    await query.message.edit_text("📸 **Étape 2 : Captures d'écran**\n\nEnvoyez de 1 à 5 images de preuves, puis tapez le mot **'FIN'**.", parse_mode="Markdown")
     return ATTENTE_PHOTOS
 
 async def photos_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -140,16 +240,16 @@ async def photos_recues(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         photo_id = update.message.photo[-1].file_id
         if len(ctx.user_data["photos"]) < 5:
             ctx.user_data["photos"].append(photo_id)
-            await update.message.reply_text(f"📸 Image enregistrée ({len(ctx.user_data['photos'])}/5). Continuez ou écrivez 'FIN'.")
+            await update.message.reply_text(f"📸 Screenshot enregistré ({len(ctx.user_data['photos'])}/5). Autre image ou écrivez 'FIN'.")
         else:
-            await update.message.reply_text("⚠️ Limite de 5 photos atteinte. Écrivez 'FIN'.")
+            await update.message.reply_text("⚠️ Maximum atteint. Écrivez 'FIN'.")
         return ATTENTE_PHOTOS
         
     if update.message.text and update.message.text.upper() == "FIN":
         if not ctx.user_data["photos"]:
-            await update.message.reply_text("❌ Envoyez au moins une photo avant d'écrire FIN.")
+            await update.message.reply_text("❌ Une image minimum requise.")
             return ATTENTE_PHOTOS
-        await update.message.reply_text("📝 **Étape 3 : Veuillez entrer la description détaillée de votre compte :**")
+        await update.message.reply_text("📝 **Étape 3 : Saisissez la description de votre compte :**")
         return ATTENTE_DESCRIPTION
     return ATTENTE_PHOTOS
 
@@ -160,7 +260,7 @@ async def description_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🪙 USDT", callback_data="devise:USDT")], 
         [InlineKeyboardButton("💳 EUR / PayPal", callback_data="devise:EUR")]
     ]
-    await update.message.reply_text("💱 **Étape 4 : Sélectionnez la devise de l'annonce :**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text("💱 **Étape 4 : Devise ?**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return ATTENTE_PRIX
 
 async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -168,13 +268,13 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query and query.data.startswith("devise:"):
         await query.answer()
         ctx.user_data["vente_devise"] = query.data.split(":")[1]
-        await query.message.edit_text(f"💰 **Fixer le montant en {ctx.user_data['vente_devise']}**\n\nEntrez le prix en chiffres :", parse_mode="Markdown")
+        await query.message.edit_text(f"💰 **Prix en {ctx.user_data['vente_devise']} ?** (Chiffres uniquement) :", parse_mode="Markdown")
         return ATTENTE_PRIX
         
     if update.message:
         texte_prix = update.message.text.strip()
         if not texte_prix.isdigit():
-            await update.message.reply_text("❌ Entrez un prix en chiffres uniquement :")
+            await update.message.reply_text("❌ Format incorrect. Saisissez uniquement des chiffres :")
             return ATTENTE_PRIX
         ctx.user_data["vente_prix"] = int(texte_prix)
         
@@ -183,15 +283,12 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
             f"📦 **Jeu :** `{ctx.user_data.get('vente_jeu')}`\n"
             f"💻 **Plateforme :** `{ctx.user_data.get('vente_plateforme')}`\n"
-            f"💰 **Prix fixé :** `{ctx.user_data.get('vente_prix')} {ctx.user_data.get('vente_devise')}`\n"
+            f"💰 **Prix :** `{ctx.user_data.get('vente_prix')} {ctx.user_data.get('vente_devise')}`\n"
             f"📝 **Description :**\n{ctx.user_data.get('vente_description')}\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             f"Souhaitez-vous envoyer cette annonce à la modération ?"
         )
-        kb = [
-            [InlineKeyboardButton("✅ Valider et Soumettre", callback_data="publier:oui")], 
-            [InlineKeyboardButton("❌ Annuler l'annonce", callback_data="publier:non")]
-        ]
+        kb = [[InlineKeyboardButton("✅ Confirmer et Envoyer", callback_data="publier:oui")], [InlineKeyboardButton("❌ Annuler", callback_data="publier:non")]]
         await update.message.reply_text(recap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return CONFIRMATION
 
@@ -201,11 +298,11 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data == "publier:oui":
         await soumettre_a_la_moderation(update, ctx)
     else:
-        await query.message.edit_text("❌ Création de l'annonce annulée.", reply_markup=get_back_to_start_keyboard())
+        await query.message.edit_text("❌ Annulée.", reply_markup=get_back_to_start_keyboard())
     return ConversationHandler.END
 
 
-# ==================== INTERACTION DES OPTIONS DU MENU ====================
+# ==================== ROUTAGE DES ACTIONS DU MENU PRINCIPAL ====================
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -217,117 +314,122 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_command(update, ctx)
         return
 
-    # 1. Option : Parcourir toutes les offres
+    # Opérationnelle : Liste complète de Vente / Offres
     if data == "menu:liste_offres":
         await query.answer()
         annonces = list(db.annonces.find({"statut": "valide"}))
         if not annonces:
-            await query.message.edit_text("📦 Aucune offre active pour le moment.", reply_markup=get_back_to_start_keyboard())
+            await query.message.edit_text("📦 Aucune offre disponible dans la liste de vente actuellement.", reply_markup=get_back_to_start_keyboard())
             return
         kb = [[InlineKeyboardButton(f"🎮 {a['categorie']} — {a['prix']} {a['devise']}", callback_data=f"voir_offre:{a['_id']}")] for a in annonces]
         kb.append([InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")])
-        await query.message.edit_text("📋 **OFFRES ACTUELLEMENT EN LIGNE**", reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.edit_text("🛍️ **LISTE DE VENTE ACTUELLE**", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # 2. Option : Mon Profil
+    # Opérationnelle : Consultation d'une offre (Correction du bug majeur)
+    if data.startswith("voir_offre:"):
+        await query.answer()
+        annonce_id = data.split(":")[1]
+        annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+        if not annonce:
+            await query.message.edit_text("❌ Offre introuvable.", reply_markup=get_back_to_start_keyboard())
+            return
+            
+        vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
+        username = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
+        
+        txt_details = (
+            f"🎮 **FICHE TECHNIQUE PRODUIT**\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"📦 **Jeu :** `{annonce.get('categorie')}`\n"
+            f"💻 **Plateforme :** `{annonce.get('plateforme')}`\n"
+            f"💰 **Prix :** `{annonce.get('prix')} {annonce.get('devise')}`\n"
+            f"📝 **Description :**\n{annonce.get('description')}\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"👤 **Vendeur :** @{username}\n\n"
+            f"⚡ *Contactez le vendeur en privé si vous êtes intéressé.*"
+        )
+        
+        if annonce.get("photos"):
+            await ctx.bot.send_photo(chat_id=query.message.chat_id, photo=annonce["photos"][0], caption=txt_details, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        else:
+            await query.message.edit_text(txt_details, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+        return
+
+    # Opérationnelle : Mon Profil
     if data == "menu:profil":
         await query.answer()
         user_data = get_user(uid)
         role = get_role_label(uid, SUPER_ADMIN_ID)
         txt = (
-            f"👤 **VOTRE PROFIL MARKETPLACE**\n"
+            f"👤 **PROFIL UTILISATEUR**\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"🆔 **ID Utilisateur :** `{uid}`\n"
             f"🎖️ **Rang :** {role}\n"
-            f"📊 **Fiabilité :** `{user_data.get('score_fiabilite', 100)}/100` ⭐\n"
-            f"📦 **Annonces Publiées :** `{user_data.get('annonces_publiees', 0)}`"
+            f"📊 **Score Fiabilité :** `{user_data.get('score_fiabilite', 100)}/100` ⭐\n"
+            f"📦 **Total ventes validées :** `{user_data.get('annonces_publiees', 0)}`"
         )
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # 3. Option : Mes Annonces
+    # Opérationnelle : Mes Annonces
     if data == "menu:mes_annonces":
         await query.answer()
         mes_offres = list(db.annonces.find({"vendeur_id": uid}))
         if not mes_offres:
-            await query.message.edit_text("📂 Vous n'avez déposé aucune annonce pour le moment.", reply_markup=get_back_to_start_keyboard())
+            await query.message.edit_text("📂 Vous n'avez aucune annonce enregistrée.", reply_markup=get_back_to_start_keyboard())
             return
         txt = "🗂️ **VOS ANNONCES DEPOSÉES :**\n\n"
         for idx, o in enumerate(mes_offres, 1):
-            txt += f"{idx}. 🎮 `{o['categorie']}` — {o['prix']} {o['devise']} | Statut : *{o['statut']}*\n"
+            txt += f"{idx}. 🎮 `{o['categorie']}` — {o['prix']} {o['devise']} | [*{o['statut']}*]\n"
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # 4. Option : Règles & CGU
+    # Opérationnelle : Règles & CGU
     if data == "menu:regles":
         await query.answer()
         regles = (
-            "📜 **RÈGLES ET CONDITIONS DU MARKETPLACE**\n"
-            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            "1️⃣ **Honnêteté obligatoire :** Toute tentative d'arnaque ou falsification de screenshots sera bannie immédiatement.\n"
-            "2️⃣ **Double vente interdite :** Vous ne pouvez pas lister un compte déjà vendu ailleurs.\n"
-            f"3️⃣ **Canal :** Restez connecté sur {CANAL_VENTE_ID} pour suivre la validation de vos ventes."
+            "📜 **CHARTE DE SÉCURITÉ**\n"
+            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            "• Les arnaques entraînent un bannissement définitif de l'identifiant Telegram.\n"
+            "• Ne donnez jamais vos identifiants avant d'avoir reçu le paiement complet."
         )
         await query.message.edit_text(regles, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # 5. Option : Classement
+    # Opérationnelle : Classement
     if data == "menu:classement":
         await query.answer()
         top_users = list(db.users.find({"banni": False}).sort("score_fiabilite", -1).limit(5))
-        txt = "🏆 **CLASSEMENT DES VENDEURS LES PLUS FIABLES**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        txt = "🏆 **TOP 5 VENDEURS FIABLES**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         for i, u in enumerate(top_users, 1):
             name = u.get("username") or f"User_{u['_id']}"
-            txt += f"{i}. @{name} — Fiabilité : `{u.get('score_fiabilite', 100)}/100` ⭐\n"
+            txt += f"{i}. @{name} — `{u.get('score_fiabilite', 100)}/100` ⭐\n"
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # 6. Option : Panneau Administration
-    if data == "menu:admin":
-        await query.answer()
-        if uid != SUPER_ADMIN_ID and get_user(uid).get("role") != "admin":
-            await query.answer("❌ Accès restreint aux administrateurs.", show_alert=True)
-            return
-        kb = [
-            [InlineKeyboardButton("🚨 Activer Mode Urgence", callback_data="admin:urgence_on")],
-            [InlineKeyboardButton("✅ Désactiver Mode Urgence", callback_data="admin:urgence_off")],
-            [InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")]
-        ]
-        await query.message.edit_text("⚙️ **PANNEAU DE CONFIGURATION DE MODÉRATION**", reply_markup=InlineKeyboardMarkup(kb))
+    # Interceptions des validations de modération
+    if data.startswith("mod:"):
+        await traitement_moderation(update, ctx)
         return
-
-    # Actions du panneau administration
-    if data.startswith("admin:"):
-        await query.answer()
-        if data == "admin:urgence_on":
-            db.configuration.update_one({"key": "mode_urgence"}, {"$set": {"value": True}}, upsert=True)
-            await query.message.edit_text("🚨 Mode urgence activé. Les transactions sont suspendues.", reply_markup=get_back_to_start_keyboard())
-        elif data == "admin:urgence_off":
-            db.configuration.update_one({"key": "mode_urgence"}, {"$set": {"value": False}}, upsert=True)
-            await query.message.edit_text("✅ Mode urgence désactivé. Le marché est ouvert.", reply_markup=get_back_to_start_keyboard())
-        return
-
-    if data.startswith("mod:"): await traitement_moderation(update, ctx); return
 
 # Moteur de recherche indépendant
 async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.edit_text("🔍 **Moteur de Recherche**\n\nEntrez le nom du jeu que vous recherchez :")
+    await query.message.edit_text("🔍 **Recherche de compte**\n\nEntrez le nom complet du jeu recherché :")
     return ATTENS_RECHERCHE_JEU
 
 async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    jeu_recherche = update.message.text.strip()
-    annonces = list(db.annonces.find({"categorie": {"$regex": f"^{jeu_recherche}$", "$options": "i"}, "statut": "valide"}))
+    jeu = update.message.text.strip()
+    annonces = list(db.annonces.find({"categorie": {"$regex": f"^{jeu}$", "$options": "i"}, "statut": "valide"}))
     if annonces:
-        annonce = annonces[0]
-        vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
-        username = vendeur.get("username", "Inconnu") if vendeur else "Inconnu"
-        txt = f"🛒 **OFFRE TROUVÉE**\n🎮 Jeu : `{annonce['categorie']}`\n💰 Prix : `{annonce['prix']} {annonce['devise']}`\n👤 Vendeur: @{username}"
+        a = annonces[0]
+        txt = f"🛒 **OFFRE DISPONIBLE**\n🎮 Jeu : `{a['categorie']}`\n💰 Prix : `{a['prix']} {a['devise']}`"
         await update.message.reply_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
     else:
-        await update.message.reply_text("🔴 Aucune offre active pour ce jeu.", reply_markup=get_back_to_start_keyboard())
+        await update.message.reply_text("🔴 Aucun compte en vente pour ce jeu actuellement.", reply_markup=get_back_to_start_keyboard())
     return ConversationHandler.END
+
 
 def main():
     flask_thread = Thread(target=run_flask, daemon=True)
