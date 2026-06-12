@@ -7,16 +7,12 @@ from telegram.error import TelegramError
 
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION MONGO DB ---
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
 client = MongoClient(MONGO_URI)
 db = client["marketplace_database"]
 
-# Variable globale pour l'anti-flood
 _USER_LAST_REQUEST_TIME = {}
 FLOOD_LIMIT_SECONDS = 2
-
-# SOURCE DE VÉRITÉ UNIQUE POUR LE CANAL
 CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@comptedejeux")
 
 def is_mode_urgence() -> bool:
@@ -63,14 +59,11 @@ def get_role_label(user_id: int, super_admin_id: int) -> str:
     return "🛒 Vendeur Vérifié"
 
 async def verifier_abonnement_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """
-    Vérifie en temps réel si l'utilisateur est bien membre du canal officiel.
-    """
     try:
         membre = await ctx.bot.get_chat_member(chat_id=CANAL_VENTE_ID, user_id=user_id)
         if membre.status in ["member", "administrator", "creator"]:
             return True
         return False
     except TelegramError as e:
-        logger.error(f"Erreur Force Join sur le canal {CANAL_VENTE_ID} pour l'ID {user_id} : {e}")
+        logger.error(f"Erreur Force Join sur le canal {CANAL_VENTE_ID} : {e}")
         return False
