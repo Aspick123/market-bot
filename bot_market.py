@@ -51,7 +51,8 @@ def run_flask():
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAFxtyQig1cNZDvYF1PnTTbOlDOW1POlrx4")
+# Récupération sécurisée du token (via Render ou valeur par défaut)
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEyKszXM8y_RNVz3XqW5LfV6UlKQtO3jzQ")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -61,7 +62,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🔐 VÉRIFICATION STRICTE ET TRADUITE DU FORCE JOIN
     est_abonne = await verifier_abonnement_canal(ctx, uid)
     if not est_abonne and uid != SUPER_ADMIN_ID:
-        # Nettoyage du nom pour le lien d'invitation
         nom_canal_propre = CANAL_VENTE_ID.replace("@", "")
         texte_bloque = (
             f"🚀 **Bienvenue sur le Marketplace !**\n\n"
@@ -183,7 +183,7 @@ async def prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
     if update.message:
         texte_prix = update.message.text.strip()
-        if not texte_prix.isdigit():
+        if not text_prix.isdigit():
             await update.message.reply_text("❌ Format invalide. Entrez un nombre entier (uniquement des chiffres) :")
             return ATTENTE_PRIX
         ctx.user_data["vente_prix"] = int(texte_prix)
