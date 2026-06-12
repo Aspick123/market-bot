@@ -16,6 +16,9 @@ db = client["marketplace_database"]
 _USER_LAST_REQUEST_TIME = {}
 FLOOD_LIMIT_SECONDS = 2
 
+# SOURCE DE VÉRITÉ UNIQUE POUR LE CANAL
+CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@comptedejeux")
+
 def is_mode_urgence() -> bool:
     config = db.configuration.find_one({"key": "mode_urgence"})
     return config.get("value", False) if config else False
@@ -59,17 +62,15 @@ def get_role_label(user_id: int, super_admin_id: int) -> str:
         return "👨‍✈️ Gérant / Staff"
     return "🛒 Vendeur Vérifié"
 
-# --- 🔐 VÉRIFICATION UNIQUE DU CANAL ---
 async def verifier_abonnement_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     """
-    Vérifie en temps réel si l'utilisateur est dans le canal configuré.
+    Vérifie en temps réel si l'utilisateur est bien membre du canal officiel.
     """
-    canal_id = os.environ.get("CANAL_VENTE_ID", "@comptedejeux")
     try:
-        membre = await ctx.bot.get_chat_member(chat_id=canal_id, user_id=user_id)
+        membre = await ctx.bot.get_chat_member(chat_id=CANAL_VENTE_ID, user_id=user_id)
         if membre.status in ["member", "administrator", "creator"]:
             return True
         return False
     except TelegramError as e:
-        logger.error(f"Erreur force join sur le canal {canal_id} pour l'user {user_id} : {e}")
+        logger.error(f"Erreur Force Join sur le canal {CANAL_VENTE_ID} pour l'ID {user_id} : {e}")
         return False
