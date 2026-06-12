@@ -17,7 +17,7 @@ except ValueError:
     SUPER_ADMIN_ID = 5117004360
 
 # Récupération du Canal de vente public
-CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@TonCanalDeVente")
+CANAL_VENTE_ID = os.environ.get("CANAL_VENTE_ID", "@comptedejeux")
 
 # Récupération sécurisée du Groupe de Modération pour éviter le crash
 groupe_mod_env = os.environ.get("GROUPE_MODERATION_ID", "")
