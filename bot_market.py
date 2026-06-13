@@ -28,13 +28,17 @@ from database_market import (
 )
 from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
-# États du tunnel de vente
+# États du tunnel de vente et de recherche
 (
     CHOIX_CATEGORIE, ATTENTE_AUTRE_JEU, CHOIX_PLATEFORME, 
     ATTENTE_PHOTOS, ATTENTE_DESCRIPTION, ATTENTE_PRIX, CONFIRMATION
 ) = range(7)
 
 ATTENS_RECHERCHE_JEU = 99
+
+# Nouveaux états pour la modification d'annonce
+ATTENTE_NOUVELLE_DESC = 100
+ATTENTE_NOUVEAU_PRIX = 101
 
 app = Flask("")
 
@@ -53,7 +57,8 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEyKszXM8y_RNVz3XqW5LfV6Ul
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", str(SUPER_ADMIN_ID))
 
-# ==================== FONCTION /START SÉCURISÉE (FORMAT HTML) ====================
+
+# ==================== FONCTION /START SÉCURISÉE ====================
 
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -62,7 +67,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"🚀 Commande /start déclenchée par l'utilisateur : {uid}")
         
-        # 1. Vérification de l'abonnement au canal
         est_abonne = await verifier_abonnement_canal(ctx, uid)
         if not est_abonne and uid != SUPER_ADMIN_ID:
             nom_canal_propre = CANAL_VENTE_ID.replace("@", "")
@@ -79,7 +83,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(texte_bloque, reply_markup=InlineKeyboardMarkup(kb_rejoin), parse_mode="HTML")
             return ConversationHandler.END
 
-        # 2. Vérification des restrictions globales
         if is_mode_urgence() and uid != SUPER_ADMIN_ID:
             await update.effective_message.reply_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
             return ConversationHandler.END
@@ -88,7 +91,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("⏳ Trop de requêtes simultanées. Veuillez patienter.")
             return ConversationHandler.END
 
-        # 3. Synchronisation du profil en base de données
         user_data = get_user(uid)
         if not user_data.get("username") or user_data["username"] != user.username:
             user_data["username"] = user.username or user.first_name
@@ -96,7 +98,6 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         role_label = get_role_label(uid, SUPER_ADMIN_ID)
         
-        # Utilisation de balises HTML (⚡ Évite les plantages liés aux pseudos avec des symboles)
         welcome_text = (
             f"🎮 <b>Bienvenue sur le Marketplace, {user.first_name} !</b>\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -121,7 +122,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Erreur critique dans start_command : {e}", exc_info=True)
 
 
-# ==================== LOGIQUE DE MODÉRATION SÉCURISÉE ====================
+# ==================== LOGIQUE DE MODÉRATION ====================
 
 async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -328,6 +329,52 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ==================== TUNNEL DE MODIFICATION (CONVERSATION) ====================
+
+async def debut_modif_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    annonce_id = query.data.split(":")[1]
+    ctx.user_data["id_annonce_a_modifier"] = annonce_id
+    
+    await query.message.reply_text("📝 **Entrez la nouvelle description pour votre compte :**\n\n(Envoyez le texte par écrit)")
+    return ATTENTE_NOUVELLE_DESC
+
+async def nouvelle_desc_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    nouvelle_desc = update.message.text.strip()
+    annonce_id = ctx.user_data.get("id_annonce_a_modifier")
+    
+    db.annonces.update_one(
+        {"_id": ObjectId(annonce_id)},
+        {"$set": {"description": nouvelle_desc, "statut": "en_attente"}}
+    )
+    await update.message.reply_text("✅ **La description a été mise à jour !**\n\n*Note : Votre annonce repasse en modération pour validation.*", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    return ConversationHandler.END
+
+async def debut_modif_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    annonce_id = query.data.split(":")[1]
+    ctx.user_data["id_annonce_a_modifier"] = annonce_id
+    
+    await query.message.reply_text("💰 **Entrez le nouveau prix (Chiffres uniquement) :**")
+    return ATTENTE_NOUVEAU_PRIX
+
+async def nouveau_prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    texte_prix = update.message.text.strip()
+    if not texte_prix.isdigit():
+        await update.message.reply_text("❌ Format incorrect. Saisissez uniquement des chiffres :")
+        return ATTENTE_NOUVEAU_PRIX
+        
+    annonce_id = ctx.user_data.get("id_annonce_a_modifier")
+    db.annonces.update_one(
+        {"_id": ObjectId(annonce_id)},
+        {"$set": {"prix": int(texte_prix), "statut": "en_attente"}}
+    )
+    await update.message.reply_text("✅ **Le prix a été mis à jour avec succès !**\n\n*Note : Votre annonce repasse en modération pour validation.*", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    return ConversationHandler.END
+
+
 # ==================== GESTION DES BOUTONS DU MENU ====================
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -393,16 +440,61 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
+    # --- MODIFICATION : Section Mes Annonces Interactive ---
     if data == "menu:mes_annonces":
         await query.answer()
         mes_offres = list(db.annonces.find({"vendeur_id": uid}))
         if not mes_offres:
             await query.message.edit_text("📂 Vous n'avez aucune annonce enregistrée.", reply_markup=get_back_to_start_keyboard())
             return
-        txt = "🗂️ **VOS ANNONCES DEPOSÉES :**\n\n"
-        for idx, o in enumerate(mes_offres, 1):
-            txt += f"{idx}. 🎮 `{o['categorie']}` — {o['prix']} {o['devise']} | [*{o['statut']}*]\n"
-        await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+            
+        kb = []
+        for o in mes_offres:
+            icon = "🟢" if o["statut"] == "valide" else "🟡" if o["statut"] == "en_attente" else "🔴"
+            kb.append([InlineKeyboardButton(f"{icon} {o['categorie']} — {o['prix']} {o['devise']}", callback_data=f"gerer_offre:{o['_id']}")])
+            
+        kb.append([InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")])
+        await query.message.edit_text("🗂️ **VOS ANNONCES DEPOSÉES**\n\nSélectionnez une de vos offres ci-dessous pour la modifier ou la supprimer définitivement :", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # --- MODIFICATION : Menu d'actions pour une annonce choisie ---
+    if data.startswith("gerer_offre:"):
+        await query.answer()
+        annonce_id = data.split(":")[1]
+        annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+        if not annonce:
+            await query.message.edit_text("❌ Offre introuvable.", reply_markup=get_back_to_start_keyboard())
+            return
+            
+        txt_details = (
+            f"⚙️ **PANNEAU DE GESTION DE L'OFFRE**\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"📦 **Jeu :** `{annonce.get('categorie')}`\n"
+            f"💻 **Plateforme :** `{annonce.get('plateforme')}`\n"
+            f"💰 **Prix actuel :** `{annonce.get('prix')} {annonce.get('devise')}`\n"
+            f"📝 **Description :**\n{annonce.get('description')}\n"
+            f"📊 **Statut actuel :** `{annonce.get('statut').upper()}`\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"Sélectionnez le paramètre à modifier :"
+        )
+        
+        kb = [
+            [
+                InlineKeyboardButton("📝 Modifier Description", callback_data=f"btn_mod_desc:{annonce_id}"),
+                InlineKeyboardButton("💰 Modifier Prix", callback_data=f"btn_mod_prix:{annonce_id}")
+            ],
+            [InlineKeyboardButton("🗑️ Supprimer définitivement", callback_data=f"btn_mod_suppr:{annonce_id}")],
+            [InlineKeyboardButton("🔙 Retour à mes offres", callback_data="menu:mes_annonces")]
+        ]
+        await query.message.edit_text(txt_details, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        return
+
+    # --- MODIFICATION : Suppression de l'annonce ---
+    if data.startswith("btn_mod_suppr:"):
+        await query.answer()
+        annonce_id = data.split(":")[1]
+        db.annonces.delete_one({"_id": ObjectId(annonce_id)})
+        await query.message.edit_text("🗑️ **Votre annonce a été définitivement supprimée du Marketplace.**", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
     if data == "menu:regles":
@@ -454,7 +546,6 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ==================== GESTIONNAIRE D'ERREURS GLOBAL ====================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Intercepte et logue toutes les exceptions non gérées pour éviter le silence radio du bot."""
     logger.error(msg="⚠️ Une exception non gérée a été interceptée :", exc_info=context.error)
 
 
@@ -484,12 +575,26 @@ def main():
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")]
     )
     
+    # Nouveau gestionnaire de modification d'annonces
+    modif_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(debut_modif_desc, pattern="^btn_mod_desc:"),
+            CallbackQueryHandler(debut_modif_prix, pattern="^btn_mod_prix:")
+        ],
+        states={
+            ATTENTE_NOUVELLE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, nouvelle_desc_recue)],
+            ATTENTE_NOUVEAU_PRIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, nouveau_prix_recu)]
+        },
+        fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")],
+        allow_reentry=True
+    )
+    
     application.add_handler(vente_conv)
     application.add_handler(recherche_conv)
+    application.add_handler(modif_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Intégration du gestionnaire d'erreurs global
     application.add_error_handler(error_handler)
     
     application.run_polling()
