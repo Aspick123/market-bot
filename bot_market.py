@@ -5,7 +5,7 @@ from threading import Thread
 from flask import Flask
 from bson.objectid import ObjectId
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -96,14 +96,20 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     
     reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
+    
     if update.callback_query:
-        await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        # FIX SAFE RETOUR : Si on revient depuis un message avec photo, on nettoie pour éviter le crash
+        try:
+            await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        except Exception:
+            await update.callback_query.message.delete()
+            await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     return ConversationHandler.END
 
 
-# ==================== LOGIQUE DE MODÉRATION ET SOUUMISSION ====================
+# ==================== LOGIQUE DE MODÉRATION SÉCURISÉE ====================
 
 async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -120,11 +126,9 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         "date_creation": time.time()
     }
     
-    # Enregistrement en Base de données
     res = db.annonces.insert_one(annonce_data)
     annonce_id = str(res.inserted_id)
     
-    # Envoi de la notification de contrôle au Staff/Super Admin
     txt_mod = (
         f"🚨 **NOUVELLE ANNONCE À MODÉRER**\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -142,16 +146,13 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         ]
     ]
     
-    try:
-        if annonce_data["photos"]:
-            await ctx.bot.send_photo(chat_id=MODERATION_CHAT_ID, photo=annonce_data["photos"][0], caption=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
-        else:
-            await ctx.bot.send_message(chat_id=MODERATION_CHAT_ID, text=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Erreur d'envoi à la modération : {e}")
+    if list(annonce_data["photos"]):
+        await ctx.bot.send_photo(chat_id=MODERATION_CHAT_ID, photo=annonce_data["photos"][0], caption=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
+    else:
+        await ctx.bot.send_message(chat_id=MODERATION_CHAT_ID, text=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
 
     await update.callback_query.message.edit_text(
-        "✅ **Votre offre a été envoyée avec succès à l'équipe !**\n\nElle sera analysée sous peu. Vous recevrez un message de confirmation automatique dès sa validation.",
+        "✅ **Votre offre a été envoyée avec succès à l'équipe !**\n\nElle sera analysée sous peu.",
         reply_markup=get_back_to_start_keyboard(),
         parse_mode="Markdown"
     )
@@ -165,7 +166,11 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
     
     if not annonce:
-        await query.message.edit_text("❌ Erreur : Cette annonce n'existe plus.")
+        txt_err = "❌ Erreur : Cette annonce n'existe plus."
+        if query.message.photo:
+            await query.message.edit_caption(caption=txt_err)
+        else:
+            await query.message.edit_text(txt_err)
         return
         
     vendeur_id = annonce["vendeur_id"]
@@ -173,7 +178,13 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "approuver":
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "valide"}})
         db.users.update_one({"_id": vendeur_id}, {"$inc": {"annonces_publiees": 1}})
-        await query.message.edit_text(f"🟢 Annonce `{annonce_id}` approuvée avec succès.")
+        
+        # FIX MODÉRATION VISUELLE : Choix dynamique selon la présence de photos
+        txt_ok = f"🟢 **Annonce `{annonce_id}` approuvée et publiée !**"
+        if query.message.photo:
+            await query.message.edit_caption(caption=txt_ok, parse_mode="Markdown")
+        else:
+            await query.message.edit_text(txt_ok, parse_mode="Markdown")
         
         # Publication automatique sur le canal public
         try:
@@ -185,12 +196,12 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"💰 **Prix :** {annonce['prix']} {annonce['devise']}\n"
                 f"📝 **Description :**\n{annonce['description']}\n"
                 f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-                f"🤖 *Pour acheter ce compte en toute sécurité, lancez notre bot officiel.*"
+                f"🤖 *Pour acheter ce compte, utilisez notre bot officiel.*"
             )
-            if annonce.get("photos"):
-                await ctx.bot.send_photo(chat_id=CANAL_VENTE_ID, photo=annonce["photos"][0], caption=txt_canal)
+            if list(annonce.get("photos", [])):
+                await ctx.bot.send_photo(chat_id=CANAL_VENTE_ID, photo=annonce["photos"][0], caption=txt_canal, parse_mode="Markdown")
             else:
-                await ctx.bot.send_message(chat_id=CANAL_VENTE_ID, text=txt_canal)
+                await ctx.bot.send_message(chat_id=CANAL_VENTE_ID, text=txt_canal, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Échec publication canal : {e}")
             
@@ -200,13 +211,18 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif action == "rejeter":
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "rejete"}})
-        await query.message.edit_text(f"🔴 Annonce `{annonce_id}` refusée.")
+        txt_refuse = f"🔴 **Annonce `{annonce_id}` refusée.**"
+        if query.message.photo:
+            await query.message.edit_caption(caption=txt_refuse, parse_mode="Markdown")
+        else:
+            await query.message.edit_text(txt_refuse, parse_mode="Markdown")
+            
         try:
             await ctx.bot.send_message(chat_id=vendeur_id, text="❌ Votre annonce a été refusée par l'équipe car elle ne respecte pas nos règles de publication.")
         except Exception: pass
 
 
-# ==================== TUNNEL DE VENTE (CONVERSATION) ====================
+# ==================== TUNNEL DE VENTE ====================
 
 async def debut_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await verifier_abonnement_canal(ctx, update.effective_user.id) and update.effective_user.id != SUPER_ADMIN_ID:
@@ -302,7 +318,7 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ==================== ROUTAGE DES ACTIONS DU MENU PRINCIPAL ====================
+# ==================== GESTION DES BOUTONS DU MENU ====================
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -314,7 +330,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_command(update, ctx)
         return
 
-    # Opérationnelle : Liste complète de Vente / Offres
     if data == "menu:liste_offres":
         await query.answer()
         annonces = list(db.annonces.find({"statut": "valide"}))
@@ -326,7 +341,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("🛍️ **LISTE DE VENTE ACTUELLE**", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # Opérationnelle : Consultation d'une offre (Correction du bug majeur)
     if data.startswith("voir_offre:"):
         await query.answer()
         annonce_id = data.split(":")[1]
@@ -346,17 +360,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"💰 **Prix :** `{annonce.get('prix')} {annonce.get('devise')}`\n"
             f"📝 **Description :**\n{annonce.get('description')}\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"👤 **Vendeur :** @{username}\n\n"
-            f"⚡ *Contactez le vendeur en privé si vous êtes intéressé.*"
+            f"👤 **Vendeur :** @{username}"
         )
         
-        if annonce.get("photos"):
+        if list(annonce.get("photos", [])):
             await ctx.bot.send_photo(chat_id=query.message.chat_id, photo=annonce["photos"][0], caption=txt_details, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         else:
             await query.message.edit_text(txt_details, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # Opérationnelle : Mon Profil
     if data == "menu:profil":
         await query.answer()
         user_data = get_user(uid)
@@ -371,7 +383,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # Opérationnelle : Mes Annonces
     if data == "menu:mes_annonces":
         await query.answer()
         mes_offres = list(db.annonces.find({"vendeur_id": uid}))
@@ -384,19 +395,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # Opérationnelle : Règles & CGU
     if data == "menu:regles":
         await query.answer()
         regles = (
             "📜 **CHARTE DE SÉCURITÉ**\n"
             "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            "• Les arnaques entraînent un bannissement définitif de l'identifiant Telegram.\n"
+            "• Les arnaques entraînent un bannissement définitif.\n"
             "• Ne donnez jamais vos identifiants avant d'avoir reçu le paiement complet."
         )
         await query.message.edit_text(regles, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # Opérationnelle : Classement
     if data == "menu:classement":
         await query.answer()
         top_users = list(db.users.find({"banni": False}).sort("score_fiabilite", -1).limit(5))
@@ -407,12 +416,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # Interceptions des validations de modération
     if data.startswith("mod:"):
         await traitement_moderation(update, ctx)
         return
 
-# Moteur de recherche indépendant
+
+# ==================== MOTEUR DE RECHERCHE ====================
+
 async def debut_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
