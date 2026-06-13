@@ -36,7 +36,7 @@ from menus import get_main_menu_keyboard, get_back_to_start_keyboard
 
 ATTENS_RECHERCHE_JEU = 99
 
-# Nouveaux états pour la modification d'annonce
+# États pour la modification d'annonce
 ATTENTE_NOUVELLE_DESC = 100
 ATTENTE_NOUVEAU_PRIX = 101
 
@@ -169,6 +169,35 @@ async def soumettre_a_la_moderation(update: Update, ctx: ContextTypes.DEFAULT_TY
         reply_markup=get_back_to_start_keyboard(),
         parse_mode="Markdown"
     )
+
+async def renvoyer_a_la_moderation(annonce_id: str, ctx: ContextTypes.DEFAULT_TYPE):
+    """Récupère l'annonce mise à jour et l'envoie à l'admin après une modification."""
+    annonce = db.annonces.find_one({"_id": ObjectId(annonce_id)})
+    if not annonce:
+        return
+    
+    uid = annonce["vendeur_id"]
+    txt_mod = (
+        f"🚨 **ANNONCE MODIFIÉE À MODÉRER**\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"🆔 **ID Annonce :** `{annonce_id}`\n"
+        f"🎮 **Jeu :** `{annonce['categorie']}`\n"
+        f"💻 **Plateforme :** `{annonce['plateforme']}`\n"
+        f"💰 **Nouveau Prix :** `{annonce['prix']} {annonce['devise']}`\n"
+        f"👤 **ID Vendeur :** `{uid}`\n"
+        f"📝 **Nouvelle Description :**\n{annonce['description']}"
+    )
+    kb_mod = [
+        [
+            InlineKeyboardButton("✅ Approuver", callback_data=f"mod:approuver:{annonce_id}"),
+            InlineKeyboardButton("❌ Rejeter", callback_data=f"mod:rejeter:{annonce_id}")
+        ]
+    ]
+    
+    if list(annonce.get("photos", [])):
+        await ctx.bot.send_photo(chat_id=MODERATION_CHAT_ID, photo=annonce["photos"][0], caption=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
+    else:
+        await ctx.bot.send_message(chat_id=MODERATION_CHAT_ID, text=txt_mod, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="Markdown")
 
 async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -329,14 +358,13 @@ async def confirmation_finale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ==================== TUNNEL DE MODIFICATION (CONVERSATION) ====================
+# ==================== TUNNEL DE MODIFICATION ====================
 
 async def debut_modif_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     annonce_id = query.data.split(":")[1]
     ctx.user_data["id_annonce_a_modifier"] = annonce_id
-    
     await query.message.reply_text("📝 **Entrez la nouvelle description pour votre compte :**\n\n(Envoyez le texte par écrit)")
     return ATTENTE_NOUVELLE_DESC
 
@@ -348,7 +376,14 @@ async def nouvelle_desc_recue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"_id": ObjectId(annonce_id)},
         {"$set": {"description": nouvelle_desc, "statut": "en_attente"}}
     )
-    await update.message.reply_text("✅ **La description a été mise à jour !**\n\n*Note : Votre annonce repasse en modération pour validation.*", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    
+    await renvoyer_a_la_moderation(annonce_id, ctx)
+    
+    await update.message.reply_text(
+        "✅ **La description a été mise à jour !**\n\n*Note : Votre annonce a été renvoyée à l'équipe d'administration pour validation.*", 
+        reply_markup=get_back_to_start_keyboard(), 
+        parse_mode="Markdown"
+    )
     return ConversationHandler.END
 
 async def debut_modif_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -356,7 +391,6 @@ async def debut_modif_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     annonce_id = query.data.split(":")[1]
     ctx.user_data["id_annonce_a_modifier"] = annonce_id
-    
     await query.message.reply_text("💰 **Entrez le nouveau prix (Chiffres uniquement) :**")
     return ATTENTE_NOUVEAU_PRIX
 
@@ -371,7 +405,14 @@ async def nouveau_prix_recu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"_id": ObjectId(annonce_id)},
         {"$set": {"prix": int(texte_prix), "statut": "en_attente"}}
     )
-    await update.message.reply_text("✅ **Le prix a été mis à jour avec succès !**\n\n*Note : Votre annonce repasse en modération pour validation.*", reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
+    
+    await renvoyer_a_la_moderation(annonce_id, ctx)
+    
+    await update.message.reply_text(
+        "✅ **Le prix a été mis à jour avec succès !**\n\n*Note : Votre annonce a été renvoyée à l'équipe d'administration pour validation.*", 
+        reply_markup=get_back_to_start_keyboard(), 
+        parse_mode="Markdown"
+    )
     return ConversationHandler.END
 
 
@@ -440,7 +481,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt, reply_markup=get_back_to_start_keyboard(), parse_mode="Markdown")
         return
 
-    # --- MODIFICATION : Section Mes Annonces Interactive ---
     if data == "menu:mes_annonces":
         await query.answer()
         mes_offres = list(db.annonces.find({"vendeur_id": uid}))
@@ -457,7 +497,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("🗂️ **VOS ANNONCES DEPOSÉES**\n\nSélectionnez une de vos offres ci-dessous pour la modifier ou la supprimer définitivement :", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # --- MODIFICATION : Menu d'actions pour une annonce choisie ---
     if data.startswith("gerer_offre:"):
         await query.answer()
         annonce_id = data.split(":")[1]
@@ -474,7 +513,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"💰 **Prix actuel :** `{annonce.get('prix')} {annonce.get('devise')}`\n"
             f"📝 **Description :**\n{annonce.get('description')}\n"
             f"📊 **Statut actuel :** `{annonce.get('statut').upper()}`\n"
-            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             f"Sélectionnez le paramètre à modifier :"
         )
         
@@ -489,7 +528,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(txt_details, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
-    # --- MODIFICATION : Suppression de l'annonce ---
     if data.startswith("btn_mod_suppr:"):
         await query.answer()
         annonce_id = data.split(":")[1]
@@ -575,7 +613,6 @@ def main():
         fallbacks=[CallbackQueryHandler(start_command, pattern="^menu:retour_start")]
     )
     
-    # Nouveau gestionnaire de modification d'annonces
     modif_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(debut_modif_desc, pattern="^btn_mod_desc:"),
