@@ -3,6 +3,8 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pymongo import MongoClient
+from bson.objectid import ObjectId
+from bson.errors import InvalidId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,32 +16,36 @@ from telegram.ext import (
 )
 
 # ==========================================
-# 1. CONFIGURATION ET CONNEXION BASE DE DONNÉES
+# 1. CONFIGURATION STRICTE DES PARAMÈTRES
 # ==========================================
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-# Utilise directement la variable existante sur ton Render
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "TON_BOT_TOKEN_SECOURS") 
-SUPER_ADMIN_ID = 123456789  # ⚠️ METS TON PROPRE ID TELEGRAM ICI
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "TON_BOT_TOKEN_DE_SECOURS")
+
+SUPER_ADMIN_ID = 5117004360         # Ton ID Administrateur personnel (Fondateur)
+PUBLIC_CHANNEL_ID = "@comptedejeux" # Ton canal public officiel
 
 client = MongoClient(MONGO_URI)
 db = client["bot_market_db"]
 
-# Initialisation rapide des configurations par défaut en BDD
+# Initialisation automatique des configurations requises en BDD
 if not db.config.find_one({"type": "recrutement"}):
     db.config.insert_one({"type": "recrutement", "ouvert": False})
 
+def safe_html(text):
+    """Nettoie les entrées utilisateur pour éviter les crashs de balises Telegram HTML"""
+    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
 # ==========================================
-# 2. SERVEUR DE PING POUR CRON-JOB.ORG (ÉVITE LES ERREURS SORTIE TROP GRANDE)
+# 2. SERVEUR ANTI-CRASH (PORT INTERNE RENDER)
 # ==========================================
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK")  # Réponse ultra-légère (2 octets) pour cron-job
-
+        self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        return # Coupe les logs pour préserver la mémoire
+        return
 
 def run_ping_server():
     port = int(os.getenv("PORT", 8080))
@@ -47,26 +53,26 @@ def run_ping_server():
     server.serve_forever()
 
 # ==========================================
-# 3. INTERFACES GRAPHIQUES (MENUS)
+# 3. INTERFACE DU MENU PRINCIPAL (8 BOUTONS)
 # ==========================================
-
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Affiche le menu principal complet avec les 8 boutons d'origine."""
     uid = update.effective_user.id
-    uname = update.effective_user.username or "Acheteur/Vendeur"
+    uname = update.effective_user.username or f"Utilisateur_{uid}"
     
-    # Enregistrement automatique de l'utilisateur s'il est nouveau
-    if not db.users.find_one({"_id": uid}):
-        db.users.insert_one({"_id": uid, "username": uname, "role": "membre", "date_inscription": time.time()})
+    # Correction FSM : On force la réinitialisation de l'état à IDLE à chaque retour au start
+    db.users.update_one(
+        {"_id": uid},
+        {"$set": {"username": uname, "state": "IDLE"}, "$setOnInsert": {"role": "membre", "date_inscription": time.time()}},
+        upsert=True
+    )
 
     txt = (
-        f"🎮 **Bienvenue sur Bot Market, @{uname} !**\n"
+        f"🎮 <b>Bienvenue sur Bot Market, @{safe_html(uname)} !</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"La plateforme sécurisée pour l'achat et la vente de vos comptes de jeux (Genshin, eFootball, etc.).\n\n"
-        f"💡 _Sélectionnez une option ci-dessous pour commencer :_"
+        f"La plateforme d'achat, de vente et de sécurisation de comptes de jeux.\n\n"
+        f"💡 <i>Sélectionne une option ci-dessous :</i>"
     )
     
-    # Configuration exacte de ton menu d'origine (Grille 2x2)
     kb = [
         [InlineKeyboardButton("🔍 Recherche", callback_data="menu:recherche"), 
          InlineKeyboardButton("🎮 Vendre un compte", callback_data="menu:vendre")],
@@ -79,361 +85,338 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]
     
     if update.callback_query:
-        await update.callback_query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await update.callback_query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     else:
-        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 # ==========================================
-# 4. GESTION DES FONCTIONNALITÉS DU MARCHÉ
+# 4. GESTIONNAIRE DE TEXTE (MACHINE D'ÉTAT - FSM)
 # ==========================================
-
-async def menu_profil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = update.effective_user.id
-    user_data = db.users.find_one({"_id": uid}) or {}
-    
-    nb_annonces = db.annonces.count_documents({"vendeur_id": uid})
-    role = user_data.get("role", "membre").upper()
-    
-    txt = (
-        f"👤 **VOTRE PROFIL BOT MARKET**\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🆔 **ID Utilisateur :** `{uid}`\n"
-        f"🎖️ **Rang / Rôle :** `{role}`\n"
-        f"📦 **Annonces déposées :** `{nb_annonces}`\n\n"
-        f"🤝 _Merci de faire confiance à notre communauté anonyme._"
-    )
-    kb = [[InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")]]
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-async def menu_liste_vente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    annonces_actives = list(db.annonces.find({"statut": "approuve"}).limit(10))
-    
-    if not annonces_actives:
-        txt = "🛍️ **LISTE DES COMPTES EN VENTE**\n\nAucun compte n'est disponible à la vente pour le moment. Repassez plus tard !"
-    else:
-        txt = "🛍️ **COMPTES DISPONIBLES SUR LE MARCHÉ**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        for idx, item in enumerate(annonces_actives, 1):
-            txt += f"{idx}. **[{item['categorie']}]** {item['description'][:50]}... — `{item['prix']}`\n"
-            
-    kb = [[InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")]]
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-async def menu_mes_annonces(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = update.effective_user.id
-    mes_items = list(db.annonces.find({"vendeur_id": uid}))
-    
-    txt = "📦 **VOS ANNONCES DÉPOSÉES**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-    if not mes_items:
-        txt += "Vous n'avez pas encore publié d'annonce."
-    else:
-        for idx, item in enumerate(mes_items, 1):
-            statut_icon = "🟢" if item["statut"] == "approuve" else "⏳" if item["statut"] == "en_attente" else "🔴"
-            txt += f"{statut_icon} **[{item['categorie']}]** — `{item['prix']}` (Statut: {item['statut']})\n"
-            
-    kb = [[InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")]]
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-async def menu_classement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    txt = (
-        "📈 **CLASSEMENT DES TOP VENDEURS**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "👑 1. @VendeurPro — 42 Ventes\n"
-        "🥈 2. @Shin_Store — 29 Ventes\n"
-        "🥉 3. @GamerElite — 15 Ventes\n\n"
-        "Le classement se base sur le volume de comptes certifiés vendus avec succès !"
-    )
-    kb = [[InlineKeyboardButton("🔙 Retour Menu", callback_data="menu:retour_start")]]
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-# ==========================================
-# 5. CONVERSATION FSM : VENDRE UN COMPTE (SANS MODE DE PAIEMENT FIGÉ)
-# ==========================================
-
-async def vente_commencer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = update.effective_user.id
-    
-    # Réinitialisation de l'état utilisateur
-    db.users.update_one({"_id": uid}, {"$set": {"etape_vente": "ATTENTE_JEU"}})
-    db.annonces.delete_many({"vendeur_id": uid, "statut": "brouillon"}) # Efface l'ancien brouillon s'il existe
-    
-    db.annonces.insert_one({
-        "vendeur_id": uid,
-        "statut": "brouillon",
-        "categorie": "",
-        "description": "",
-        "prix": ""
-    })
-    
-    txt = (
-        "🎮 **DÉPOSER UNE ANNONCE (Étape 1/3)**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "Quel est le jeu concerné par votre compte ?\n"
-        "_(Exemple : Genshin Impact, eFootball, Clash of Clans...)_\n\n"
-        "👉 _Répondez en écrivant le texte directement ici._"
-    )
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="menu:retour_start")]]), parse_mode="Markdown")
-
-# ==========================================
-# 6. TUNNEL DE RECRUTEMENT ANONYME GÉRANT
-# ==========================================
-
-async def menu_regles(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    txt = (
-        "📜 **RÈGLES DE LA COMMUNAUTÉ & CGU**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "1. Les arnaques ou tentatives de double vente mènent à un bannissement définitif.\n"
-        "2. Les prix doivent rester transparents.\n"
-        "3. Nous respectons scrupuleusement l'anonymat de chacun.\n"
-    )
-    kb = [[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]
-    
-    # Ajout du bouton de recrutement si actif
-    config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
-    if config["ouvert"]:
-        kb.insert(0, [InlineKeyboardButton("📢 Postuler Anonymement comme Gérant", callback_data="membre:postuler")])
-        
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-async def membre_postuler_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = update.effective_user.id
-    
-    deja_existe = db.candidatures.find_one({"user_id": uid, "statut": {"$in": ["en_attente", "approuve"]}})
-    if deja_existe:
-        await query.answer("⚠️ Vous possédez déjà un dossier actif ou validé.", show_alert=True)
-        return
-        
-    db.candidatures.delete_many({"user_id": uid, "statut": "brouillon"})
-    db.candidatures.insert_one({
-        "user_id": uid,
-        "username": update.effective_user.username or f"ID_{uid}",
-        "statut": "brouillon",
-        "etape": "ATTENTE_DISPO",
-        "reponses": {}
-    })
-    
-    txt = (
-        "📢 **RECRUTEMENT GÉRANT — ÉTAPE 1/3**\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        "Votre anonymat est respecté. Seule votre rigueur compte.\n\n"
-        "❓ **Question 1 : Quelles sont vos disponibilités par semaine ?**\n"
-        "_(Exemple : 4 jours par semaine, les weekends uniquement...)_\n\n"
-        "👉 _Envoyez votre réponse par texte._"
-    )
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="candidature:annuler")]]), parse_mode="Markdown")
-
-# ==========================================
-# 7. ROUTEUR DE TEXTE GLOBAL (TRAITEMENT DES DIALOGUES INTERACTIFS)
-# ==========================================
-
 async def global_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
     
-    # A. VÉRIFICATION DU TUNNEL DE VENTE DE COMPTE
     user_data = db.users.find_one({"_id": uid}) or {}
-    etape_vente = user_data.get("etape_vente")
+    current_state = user_data.get("state", "IDLE")
     
-    if etape_vente:
-        if etape_vente == "ATTENTE_JEU":
-            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"categorie": text}})
-            db.users.update_one({"_id": uid}, {"$set": {"etape_vente": "ATTENTE_DESC"}})
-            await update.message.reply_text("📝 **ÉTAPE 2/3 : Description du compte**\n\nDécrivez le contenu de votre compte (Niveau, personnages, équipements, ressources...).\nSoyez précis !")
-            return
-            
-        elif etape_vente == "ATTENTE_DESC":
-            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"description": text}})
-            db.users.update_one({"_id": uid}, {"$set": {"etape_vente": "ATTENTE_PRIX"}})
-            await update.message.reply_text("💰 **ÉTAPE 3/3 : Prix & Devise**\n\nEntrez le prix souhaité ainsi que votre devise préférée.\n_(Exemple : 15 000 FCFA, 20 TON, 30 TUSD...)_")
-            return
-            
-        elif etape_vente == "ATTENTE_PRIX":
-            # Clôture et envoi à la modération des Gérants
-            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"prix": text, "statut": "en_attente", "date_depot": time.time()}})
-            db.users.update_one({"_id": uid}, {"$unset": {"etape_vente": ""}})
-            
-            # Récupération pour affichage
-            annonce = db.annonces.find_one({"vendeur_id": uid, "statut": "en_attente"}, sort=[("date_depot", -1)])
-            
-            await update.message.reply_text("✅ **Votre annonce a été soumise avec succès !**\nElle apparaîtra sur la Marketplace dès qu'un gérant l'aura vérifiée.")
-            
-            # 🚨 ALERTE AUDIT PRIVÉE ENVOYÉE IMMÉDIATEMENT DANS TES MESSAGES
-            txt_audit = (
-                f"📥 **NOUVEAU COMPTE SOUMIS POUR MODÉRATION**\n"
-                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-                f"👤 **Vendeur :** @{update.effective_user.username} `({uid})`\n"
-                f"🎮 **Jeu :** `{annonce['categorie']}`\n"
-                f"💰 **Prix demandé :** `{annonce['prix']}`\n"
-                f"📝 **Description :**\n_\"{annonce['description']}\"_"
-            )
-            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_audit, parse_mode="Markdown")
-            return
-
-    # B. VÉRIFICATION DU TUNNEL DE CANDIDATURE GÉRANT
-    cand = db.candidatures.find_one({"user_id": uid, "statut": "brouillon"})
-    if cand:
-        etape_cand = cand.get("etape")
-        if etape_cand == "ATTENTE_DISPO":
-            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.dispo": text, "etape": "ATTENTE_HORAIRES"}})
-            await update.message.reply_text("⏳ **ÉTAPE 2/3 : Vos Horaires**\n\n❓ **Quelles tranches horaires couvrez-vous en général pendant la journée ?**")
-            return
-        elif etape_cand == "ATTENTE_HORAIRES":
-            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.horaires": text, "etape": "ATTENTE_MOTIV"}})
-            await update.message.reply_text("✍️ **ÉTAPE 3/3 : Motivations**\n\n❓ **Pourquoi devrions-nous vous intégrer dans l'équipe des gérants ?**")
-            return
-        elif etape_cand == "ATTENTE_MOTIV":
-            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.motivation": text, "statut": "en_attente", "date_soumission": time.time()}, "$unset": {"etape": ""}})
-            cand_f = db.candidatures.find_one({"user_id": uid, "statut": "en_attente"})
-            
-            await update.message.reply_text("🎉 **Candidature anonyme reçue !** Le Fondateur reviendra vers vous si votre profil l'intéresse.")
-            
-            # 🚨 ENVOI DIRECT VERS TES MESSAGES PRÉVUS POUR LE CONTRÔLE
-            txt_notif = (
-                f"📥 **CANDIDATURE GÉRANT ENTRANTE**\n"
-                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-                f"👤 **Candidat :** @{cand_f['username']} `({uid})`\n"
-                f"📅 **Dispo :** _{cand_f['reponses']['dispo']}_\n"
-                f"⏰ **Horaires :** _{cand_f['reponses']['horaires']}_\n"
-                f"📝 **Lettre :** *\"{cand_f['reponses']['motivation']}\"*"
-            )
-            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_notif, parse_mode="Markdown")
-            return
-
-    # Si aucune interaction en cours
-    await update.message.reply_text("💡 Pour naviguer, utilisez les boutons interactifs du menu avec `/start`.")
-
-# ==========================================
-# 8. PANNEAU ADMIN ET CONTRÔLE DE L'ÉQUIPE (SUPER_ADMIN)
-# ==========================================
-
-async def menu_espace_gerant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = update.effective_user.id
-    
-    user_data = db.users.find_one({"_id": uid}) or {}
-    if user_data.get("role") != "moderateur" and uid != SUPER_ADMIN_ID:
-        await query.answer("⚠️ Accès refusé : Réservé aux gérants.", show_alert=True)
+    # ─── A. RECHERCHE DE COMPTE ───
+    if current_state == "RECHERCHE_SOUHAIT":
+        db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
+        resultats = list(db.annonces.find({
+            "statut": "approuve",
+            "$or": [
+                {"categorie": {"$regex": text, "$options": "i"}},
+                {"description": {"$regex": text, "$options": "i"}}
+            ]
+        }))
+        
+        kb = [[InlineKeyboardButton("🔙 Menu Principal", callback_data="menu:retour_start")]]
+        if not resultats:
+            await update.message.reply_text(f"🔍 <b>Aucun compte trouvé pour :</b> <code>{safe_html(text)}</code>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        else:
+            txt_res = f"🔍 <b>Comptes correspondants à votre recherche :</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            for res in resultats:
+                txt_res += f"🎮 <b>[{safe_html(res['categorie'])}]</b> — <code>{safe_html(res['prix'])}</code>\n📝 {safe_html(res['description'])}\n\n"
+            await update.message.reply_text(txt_res, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
-    txt = "🛠️ **PANNEAU ADMINISTRATIF DU STAFF**\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\nSélectionnez votre module :"
-    kb = [[InlineKeyboardButton("📁 Modérer les annonces (Simulé)", callback_data="admin:simuler_audit")]]
+    # ─── B. TUNNEL DE VENTE ───
+    if current_state.startswith("VENTE_"):
+        if current_state == "VENTE_JEU":
+            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"categorie": text}})
+            db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_DESC"}})
+            await update.message.reply_text("📝 <b>ÉTAPE 2/3 : Contenu du compte</b>\n\nDécris précisément l'état du compte (Niveau, inventaire, personnages...).")
+            return
+            
+        elif current_state == "VENTE_DESC":
+            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"description": text}})
+            db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_PRIX"}})
+            await update.message.reply_text("💰 <b>ÉTAPE 3/3 : Prix &amp; Devise</b>\n\nIndique le prix de vente et ta devise librement (Ex: 25 000 FCFA, 15 TON, 30 TUSD).")
+            return
+            
+        elif current_state == "VENTE_PRIX":
+            db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
+            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"prix": text, "statut": "en_attente", "date_depot": time.time()}})
+            
+            annonce = db.annonces.find_one({"vendeur_id": uid, "statut": "en_attente"}, sort=[("date_depot", -1)])
+            annonce_id = str(annonce["_id"])
+            
+            await update.message.reply_text("✅ <b>Annonce soumise !</b> Elle a été transmise au Fondateur pour validation.")
+            
+            txt_admin = (
+                f"📥 <b>NOUVEAU COMPTE À MODÉRER</b>\n"
+                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                f"👤 <b>Vendeur :</b> @{safe_html(update.effective_user.username)} <code>({uid})</code>\n"
+                f"🎮 <b>Jeu :</b> <code>{safe_html(annonce['categorie'])}</code>\n"
+                f"💰 <b>Prix :</b> <code>{safe_html(annonce['prix'])}</code>\n"
+                f"📝 <b>Description :</b> <i>\"{safe_html(annonce['description'])}\"</i>\n"
+            )
+            kb_mod = [[
+                InlineKeyboardButton("✅ Approuver & Publier", callback_data=f"action_mod:approuve:{annonce_id}"),
+                InlineKeyboardButton("❌ Rejeter", callback_data=f"action_mod:rejete:{annonce_id}")
+            ]]
+            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_admin, reply_markup=InlineKeyboardMarkup(kb_mod), parse_mode="HTML")
+            return
+
+    # ─── C. TUNNEL DE RECRUTEMENT ───
+    if current_state.startswith("CAND_"):
+        if current_state == "CAND_DISPO":
+            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.dispo": text}})
+            db.users.update_one({"_id": uid}, {"$set": {"state": "CAND_HORAIRES"}})
+            await update.message.reply_text("⏳ <b>ÉTAPE 2/3 : Horaires</b>\n\nQuelles sont tes heures de disponibilité habituelles ?")
+            return
+        elif current_state == "CAND_HORAIRES":
+            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.horaires": text}})
+            db.users.update_one({"_id": uid}, {"$set": {"state": "CAND_MOTIV"}})
+            await update.message.reply_text("✍️ <b>ÉTAPE 3/3 : Motivations</b>\n\nPourquoi veux-tu rejoindre le staff à ce poste ?")
+            return
+        elif current_state == "CAND_MOTIV":
+            db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
+            db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"reponses.motivation": text, "statut": "en_attente", "date_soumission": time.time()}})
+            
+            cand = db.candidatures.find_one({"user_id": uid, "statut": "en_attente"}, sort=[("date_soumission", -1)])
+            await update.message.reply_text("🎉 <b>Candidature transmise avec succès !</b> Le Fondateur va l'analyser.")
+            
+            txt_cand = (
+                f"📥 <b>CANDIDATURE REÇUE — RECRUTEMENT</b>\n"
+                f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                f"👤 <b>Candidat :</b> @{safe_html(cand['username'])} <code>({uid})</code>\n"
+                f"💼 <b>Poste visé :</b> <code>{safe_html(cand['poste'].upper())}</code>\n"
+                f"📅 <b>Dispo :</b> <i>{safe_html(cand['reponses']['dispo'])}</i>\n"
+                f"⏰ <b>Horaires :</b> <i>{safe_html(cand['reponses']['horaires'])}</i>\n"
+                f"📝 <b>Motivations :</b> <b>\"{safe_html(cand['reponses']['motivation'])}\"</b>"
+            )
+            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_cand, parse_mode="HTML")
+            return
+
+    await update.message.reply_text("💡 Utilise les touches du menu ou saisis /start.")
+
+# ==========================================
+# 5. SYSTÈME DE TRAITEMENT ET AUDIT FINAL
+# ==========================================
+async def gerer_decision_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE, choix: str, id_annonce: str):
+    query = update.callback_query
+    admin_uname = update.effective_user.username or "Admin"
     
-    if uid == SUPER_ADMIN_ID:
-        kb.append([InlineKeyboardButton("👥 Recrutement & Campagnes", callback_data="admin:gestion_equipe")])
+    try:
+        annonce = db.annonces.find_one({"_id": ObjectId(id_annonce)})
+    except InvalidId:
+        await query.edit_text("❌ Erreur : ID d'annonce corrompu.")
+        return
+
+    if not annonce:
+        await query.edit_text("❌ Cette annonce n'existe plus.")
+        return
+
+    vendeur_id = annonce["vendeur_id"]
+    vendeur_data = db.users.find_one({"_id": vendeur_id}) or {"username": "Inconnu"}
+
+    if choix == "approuve":
+        db.annonces.update_one({"_id": ObjectId(id_annonce)}, {"$set": {"statut": "approuve"}})
         
-    kb.append([InlineKeyboardButton("🔙 Menu Principal", callback_data="menu:retour_start")])
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        txt_canal = (
+            f"📣 <b>COMPTE SÉCURISÉ DISPONIBLE !</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"🎮 <b>Jeu :</b> #{safe_html(annonce['categorie'].replace(' ', '_'))}\n"
+            f"💰 <b>Prix :</b> <code>{safe_html(annonce['prix'])}</code>\n"
+            f"📝 <b>Détails :</b>\n<i>{safe_html(annonce['description'])}</i>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"👤 <b>Vendeur :</b> @{safe_html(vendeur_data['username'])}\n\n"
+            f"🤝 <i>Pour acheter ce compte via un gérant de confiance, clique sur le bouton ci-dessous.</i>"
+        )
+        
+        # Récupération dynamique et sécurisée du username du bot sans call réseau lent
+        bot_username = ctx.bot.username
+        kb_canal = [[InlineKeyboardButton("🛒 Acheter / Sécuriser ce compte", url=f"https://t.me/{bot_username}?start=acheter_{id_annonce}")]]
+        
+        await ctx.bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=txt_canal, reply_markup=InlineKeyboardMarkup(kb_canal), parse_mode="HTML")
+        
+        try:
+            await ctx.bot.send_message(chat_id=vendeur_id, text=f"🟢 Votre compte <b>{safe_html(annonce['categorie'])}</b> a été validé et publié !", parse_mode="HTML")
+        except Exception: pass
+        await query.edit_text("✅ Annonce acceptée et envoyée sur le canal public.")
 
-async def menu_gestion_equipe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != SUPER_ADMIN_ID: return
+    elif choix == "rejete":
+        db.annonces.update_one({"_id": ObjectId(id_annonce)}, {"$set": {"statut": "rejete"}})
+        try:
+            await ctx.bot.send_message(chat_id=vendeur_id, text=f"🔴 Votre annonce pour <b>{safe_html(annonce['categorie'])}</b> a été refusée.", parse_mode="HTML")
+        except Exception: pass
+        await query.edit_text("❌ Annonce refusée.")
 
-    config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
-    statut = "🟢 OUVERT" if config["ouvert"] else "🔴 FERMÉ"
-    nb_cand = db.candidatures.count_documents({"statut": "en_attente"})
-    
-    txt = (
-        f"👥 **GESTION RECRUTEMENT GÉRANTS**\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"📢 Campagne actuelle : `{statut}`\n"
-        f"📥 Dossiers à examiner : `{nb_cand}`"
-    )
-    kb = [
-        [InlineKeyboardButton("🔄 Ouvrir / Fermer la campagne", callback_data="admin:toggle_recrutement")],
-        [InlineKeyboardButton("🔙 Retour Staff", callback_data="menu:espace_gerant")]
-    ]
-    await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-async def toggle_recrutement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != SUPER_ADMIN_ID: return
-    
-    config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
-    nouvel_etat = not config["ouvert"]
-    db.config.update_one({"type": "recrutement"}, {"$set": {"ouvert": nouvel_etat}}, upsert=True)
-    
-    await query.answer(f"Recrutement mis à jour : {'Ouvert 🟢' if nouvel_etat else 'Fermé 🔴'}")
-    await menu_gestion_equipe(update, ctx)
-
-async def simuler_audit_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Déclenche la copie de résumé demandée vers tes messages privés lors d'une validation."""
-    query = update.callback_query
-    gerant_uname = update.effective_user.username or "Gérant_Anonyme"
-    
-    # Simulation d'une validation d'annonce
     txt_audit = (
-        f"👁️ **AUDIT GÉRANT — COPIE DE SÉCURITÉ**\n"
+        f"👁️ <b>AUDIT DE MODÉRATION</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🛠️ **Modérateur :** @{gerant_uname}\n"
-        f"📋 **Action :** `APPROBATION ET RESTOCK ✅`\n"
-        f"🎮 **Type :** `Compte eFootball Campaign`\n"
-        f"💰 **Valeur enregistrée :** `25 000 FCFA`\n"
+        f"🛠️ <b>Modérateur :</b> @{safe_html(admin_uname)}\n"
+        f"📋 **Action :** <code>{'APPROBATION' if choix == 'approuve' else 'REJET'}</code>\n"
+        f"🎮 **Jeu :** <code>{safe_html(annonce['categorie'])}</code>\n"
+        f"💰 **Prix :** <code>{safe_html(annonce['prix'])}</code>\n"
         f"📅 **Date :** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"📝 **Résumé du contenu :** Prêt pour transfert immédiat au client."
     )
-    # Redirection vers tes messages privés
-    await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_audit, parse_mode="Markdown")
-    await query.answer("✅ Rapport d'audit envoyé dans tes messages privés !", show_alert=True)
+    await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_audit, parse_mode="HTML")
 
 # ==========================================
-# 9. CENTRALISATION DU ROUTAGE DES BOUTONS (CALLBACKS)
+# 6. ROUTEUR GLOBAL DES ACTIONS INTERACTIVES
 # ==========================================
-
 async def button_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     await query.answer()
-    
+    uid = update.effective_user.id
+
+    if data.startswith("action_mod:"):
+        _, choix, id_annonce = data.split(":")
+        await gerer_decision_moderation(update, ctx, choix, id_annonce)
+        return
+
+    if data.startswith("choix_poste:"):
+        poste = data.split(":")[1]
+        db.users.update_one({"_id": uid}, {"$set": {"state": "CAND_DISPO"}})
+        db.candidatures.update_one({"user_id": uid, "statut": "brouillon"}, {"$set": {"poste": poste}})
+        await query.message.edit_text(f"📢 <b>RECRUTEMENT [{safe_html(poste.upper())}] (1/3)</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\nQuelles sont tes disponibilités hebdomadaires pour ce poste ?",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        return
+
     if data == "menu:retour_start":
         await start(update, ctx)
-    elif data == "menu:profil":
-        await menu_profil(update, ctx)
-    elif data == "menu:liste_vente":
-        await menu_liste_vente(update, ctx)
-    elif data == "menu:mes_annonces":
-        await menu_mes_annonces(update, ctx)
-    elif data == "menu:classement":
-        await menu_classement(update, ctx)
-    elif data == "menu:regles":
-        await menu_regles(update, ctx)
+        
+    elif data == "menu:recherche":
+        db.users.update_one({"_id": uid}, {"$set": {"state": "RECHERCHE_SOUHAIT"}})
+        await query.message.edit_text("🔍 Envoie le nom du jeu ou le mot-clé que tu recherches :", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
     elif data == "menu:vendre":
-        await vente_commencer_handler(update, ctx)
-    elif data == "menu:espace_gerant":
-        await menu_espace_gerant(update, ctx)
-    elif data == "admin:gestion_equipe":
-        await menu_gestion_equipe(update, ctx)
-    elif data == "admin:toggle_recrutement":
-        await toggle_recrutement(update, ctx)
-    elif data == "admin:simuler_audit":
-        await simuler_audit_handler(update, ctx)
+        db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_JEU"}})
+        db.annonces.delete_many({"vendeur_id": uid, "statut": "brouillon"})
+        db.annonces.insert_one({"vendeur_id": uid, "statut": "brouillon", "categorie": "", "description": "", "prix": ""})
+        await query.message.edit_text("🎮 <b>DÉPOSER UNE ANNONCE (Étape 1/3)</b>\n\nQuel est le nom du jeu ?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
+    elif data == "menu:liste_vente":
+        marche = list(db.annonces.find({"statut": "approuve"}))
+        txt = "🛍️ <b>COMPTES EN VENTE</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        if not marche:
+            txt += "Aucun compte disponible pour le moment."
+        else:
+            for item in marche:
+                txt += f"🔹 <b>[{safe_html(item['categorie'])}]</b> — <code>{safe_html(item['prix'])}</code>\n<i>Details:</i> {safe_html(item['description'])}\n\n"
+            txt += "Pour acheter l'un de ces comptes en toute sécurité, utilise le bouton de sécurisation sur le canal public !"
+        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
+    elif data == "menu:profil":
+        nb = db.annonces.count_documents({"vendeur_id": uid, "statut": "approuve"})
+        await query.message.edit_text(f"👤 <b>VOTRE PROFIL</b>\n▬▬▬▬▬▬▬▬▬▬▬▬\nID: <code>{uid}</code>\nRang: <code>Membre</code>\nComptes vendus: <code>{nb}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
+    elif data == "menu:mes_annonces":
+        mes_depots = list(db.annonces.find({"vendeur_id": uid}))
+        txt = "📦 <b>VOS ANNONCES DÉPOSÉES</b>\n▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        if not mes_depots: txt += "Aucune annonce enregistrée."
+        else:
+            for idx, item in enumerate(mes_depots, 1):
+                txt += f"{idx}. <b>[{safe_html(item['categorie'])}]</b> — <code>{safe_html(item['prix'])}</code> ({safe_html(item['statut'])})\n"
+        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
+    elif data == "menu:classement":
+        txt = "📈 <b>CLASSEMENT DES MEILLEURS VENDEURS</b>\n▬▬▬▬▬▬▬▬▬▬▬▬\n👑 1. @VendeurPro — 42 Ventes\n🥈 2. @Shin_Store — 29 Ventes\n🥉 3. @GamerElite — 15 Ventes"
+        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]), parse_mode="HTML")
+        
+    elif data == "menu:regles":
+        config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
+        kb = [[InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]
+        if config["ouvert"]:
+            kb.insert(0, [InlineKeyboardButton("📢 Postuler au Staff", callback_data="membre:postuler")])
+        txt = "📜 <b>RÈGLES DU MARCHÉ</b>\n\n1. L'utilisation d'un gérant comme intermédiaire (Escrow) est obligatoire pour sécuriser la transaction."
+        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        
     elif data == "membre:postuler":
-        await membre_postuler_handler(update, ctx)
-    elif data == "candidature:annuler":
-        db.candidatures.delete_many({"user_id": update.effective_user.id, "statut": "brouillon"})
+        db.candidatures.delete_many({"user_id": uid, "statut": "brouillon"})
+        db.candidatures.insert_one({"user_id": uid, "username": update.effective_user.username or f"ID_{uid}", "statut": "brouillon", "reponses": {}})
+        
+        kb_poste = [
+            [InlineKeyboardButton("👥 Devenir Gérant / Modérateur", callback_data="choix_poste:gerant")],
+            [InlineKeyboardButton("💻 Devenir Développeur", callback_data="choix_poste:developpeur")],
+            [InlineKeyboardButton("❌ Annuler", callback_data="menu:retour_start")]
+        ]
+        await query.message.edit_text("💼 <b>RECRUTEMENT BOT MARKET</b>\n\nPour quel poste souhaites-tu soumettre ta candidature ?", reply_markup=InlineKeyboardMarkup(kb_poste), parse_mode="HTML")
+        
+    elif data == "menu:espace_gerant":
+        if uid != SUPER_ADMIN_ID:
+            await query.answer("⚠️ Réservé au Fondateur.", show_alert=True)
+            return
+        kb = [[InlineKeyboardButton("👥 Recrutement", callback_data="admin:gestion_equipe")], [InlineKeyboardButton("🔙 Retour", callback_data="menu:retour_start")]]
+        await query.message.edit_text("🛠️ <b>PANNEAU FONDATEUR</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        
+    elif data == "admin:gestion_equipe":
+        if uid != SUPER_ADMIN_ID: return
+        config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
+        statut = "🟢 OUVERT" if config["ouvert"] else "🔴 FERMÉ"
+        kb = [[InlineKeyboardButton("🔄 Ouvrir/Fermer", callback_data="admin:toggle_recrutement")], [InlineKeyboardButton("🔙 Retour", callback_data="menu:espace_gerant")]]
+        await query.message.edit_text(f"👥 <b>CAMPAGNE RECRUTEMENT</b>\n\nStatut : <code>{statut}</code>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        
+    elif data == "admin:toggle_recrutement":
+        if uid != SUPER_ADMIN_ID: return
+        config = db.config.find_one({"type": "recrutement"}) or {"ouvert": False}
+        db.config.update_one({"type": "recrutement"}, {"$set": {"ouvert": not config["ouvert"]}})
+        await query.answer("Recrutement mis à jour !")
         await start(update, ctx)
 
 # ==========================================
-# 10. CORPS PRINCIPAL D'EXÉCUTION
+# 7. PRÉPARATION DE LA MISE EN DISPOSITION DE TRANSACTION
+# ==========================================
+async def check_start_arguments(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Détecte si un acheteur clique sur 'Acheter' depuis le canal public."""
+    if not update.message or not update.message.text:
+        return
+
+    msg_text = update.message.text
+    uid = update.effective_user.id
+    
+    if msg_text.startswith("/start acheter_"):
+        id_annonce = msg_text.split("acheter_")[1]
+        
+        # Sécurité critique : On intercepte les ID invalides injectés manuellement
+        try:
+            annonce = db.annonces.find_one({"_id": ObjectId(id_annonce)})
+        except (InvalidId, Exception):
+            await update.message.reply_text("❌ <b>Lien d'achat invalide ou corrompu.</b>", parse_mode="HTML")
+            return
+        
+        if not annonce:
+            await update.message.reply_text("❌ Désolé, ce compte n'est plus disponible sur le marché.")
+            return
+            
+        vendeur = db.users.find_one({"_id": annonce["vendeur_id"]})
+        v_name = f"@{vendeur['username']}" if vendeur else "Inconnu"
+        buyer_name = f"@{update.effective_user.username}" or f"ID_{uid}"
+        
+        await update.message.reply_text("⏳ <b>Demande d'achat enregistrée !</b>\nLe Fondateur a été alerté pour sécuriser la transaction comme intermédiaire. Reste attentif à tes messages.")
+        
+        txt_escalade = (
+            f"🚨 <b>DEMANDE DE TRANSACTION SÉCURISÉE (ESCROW)</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"🛒 <b>Acheteur :</b> {safe_html(buyer_name)} <code>({uid})</code>\n"
+            f"👤 <b>Vendeur :</b> {safe_html(v_name)} <code>({annonce['vendeur_id']})</code>\n"
+            f"🎮 <b>Compte ciblé :</b> <code>{safe_html(annonce['categorie'])}</code>\n"
+            f"💰 <b>Montant de la transaction :</b> <code>{safe_html(annonce['prix'])}</code>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"⚡ <i>Prends contact avec eux pour sécuriser l'échange et le paiement !</i>"
+        )
+        await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_escalade, parse_mode="HTML")
+        return
+        
+    await start(update, ctx)
+
+# ==========================================
+# 8. FIL D'EXÉCUTION PRINCIPAL
 # ==========================================
 def main():
-    # Étape A : Lancement du serveur Keep-Alive en arrière-plan
     threading.Thread(target=run_ping_server, daemon=True).start()
 
-    # Étape B : Lancement du bot Telegram
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
+    # Gestion de l'argument de démarrage pour l'achat en un clic
+    app.add_handler(CommandHandler("start", check_start_arguments))
     app.add_handler(CallbackQueryHandler(button_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
 
-    print("🚀 Bot Market entièrement configuré et actif !")
+    print("🚀 PRODUCTION : Le Bot Market est 100% sécurisé et opérationnel !")
     app.run_polling()
 
 if __name__ == "__main__":
