@@ -53,60 +53,72 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEyKszXM8y_RNVz3XqW5LfV6Ul
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", str(SUPER_ADMIN_ID))
 
+# ==================== FONCTION /START SÉCURISÉE (FORMAT HTML) ====================
+
 async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    user = update.effective_user
-    
-    est_abonne = await verifier_abonnement_canal(ctx, uid)
-    if not est_abonne and uid != SUPER_ADMIN_ID:
-        nom_canal_propre = CANAL_VENTE_ID.replace("@", "")
-        texte_bloque = (
-            f"🚀 **Bienvenue sur le Marketplace !**\n\n"
-            f"Pour pouvoir utiliser ce bot et voir les annonces, vous devez obligatoirement rejoindre notre canal officiel.\n\n"
-            f"👉 **Canal :** {CANAL_VENTE_ID}\n\n"
-            f"Une fois installé dans le canal, revenez ici et cliquez sur /start pour débloquer l'accès."
-        )
-        kb_rejoin = [[InlineKeyboardButton("📢 Rejoindre le Canal officiel", url=f"https://t.me/{nom_canal_propre}")]]
-        if update.callback_query:
-            await update.callback_query.message.reply_text(texte_bloque, reply_markup=InlineKeyboardMarkup(kb_rejoin), parse_mode="Markdown")
-        else:
-            await update.message.reply_text(texte_bloque, reply_markup=InlineKeyboardMarkup(kb_rejoin), parse_mode="Markdown")
-        return ConversationHandler.END
-
-    if is_mode_urgence() and uid != SUPER_ADMIN_ID:
-        await update.effective_message.reply_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
-        return ConversationHandler.END
+    try:
+        uid = update.effective_user.id
+        user = update.effective_user
         
-    if is_flooded(uid):
-        await update.effective_message.reply_text("⏳ Trop de requêtes simultanées. Veuillez patienter.")
+        logger.info(f"🚀 Commande /start déclenchée par l'utilisateur : {uid}")
+        
+        # 1. Vérification de l'abonnement au canal
+        est_abonne = await verifier_abonnement_canal(ctx, uid)
+        if not est_abonne and uid != SUPER_ADMIN_ID:
+            nom_canal_propre = CANAL_VENTE_ID.replace("@", "")
+            texte_bloque = (
+                f"🚀 <b>Bienvenue sur le Marketplace !</b>\n\n"
+                f"Pour pouvoir utiliser ce bot et voir les annonces, vous devez obligatoirement rejoindre notre canal officiel.\n\n"
+                f"👉 <b>Canal :</b> {CANAL_VENTE_ID}\n\n"
+                f"Une fois installé dans le canal, revenez ici et cliquez sur /start pour débloquer l'accès."
+            )
+            kb_rejoin = [[InlineKeyboardButton("📢 Rejoindre le Canal officiel", url=f"https://t.me/{nom_canal_propre}")]]
+            if update.callback_query:
+                await update.callback_query.message.reply_text(texte_bloque, reply_markup=InlineKeyboardMarkup(kb_rejoin), parse_mode="HTML")
+            else:
+                await update.message.reply_text(texte_bloque, reply_markup=InlineKeyboardMarkup(kb_rejoin), parse_mode="HTML")
+            return ConversationHandler.END
+
+        # 2. Vérification des restrictions globales
+        if is_mode_urgence() and uid != SUPER_ADMIN_ID:
+            await update.effective_message.reply_text("🚨 Le Marketplace est temporairement suspendu pour maintenance.")
+            return ConversationHandler.END
+            
+        if is_flooded(uid):
+            await update.effective_message.reply_text("⏳ Trop de requêtes simultanées. Veuillez patienter.")
+            return ConversationHandler.END
+
+        # 3. Synchronisation du profil en base de données
+        user_data = get_user(uid)
+        if not user_data.get("username") or user_data["username"] != user.username:
+            user_data["username"] = user.username or user.first_name
+            save_user(uid, user_data)
+
+        role_label = get_role_label(uid, SUPER_ADMIN_ID)
+        
+        # Utilisation de balises HTML (⚡ Évite les plantages liés aux pseudos avec des symboles)
+        welcome_text = (
+            f"🎮 <b>Bienvenue sur le Marketplace, {user.first_name} !</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"🎖️ <b>Rang :</b> {role_label}\n\n"
+            f"🤝 <i>Achetez et vendez vos comptes de jeux en toute sécurité.</i>\n\n"
+            f"👇 <b>Sélectionnez une option ci-dessous :</b>"
+        )
+        
+        reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
+        
+        if update.callback_query:
+            try:
+                await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="HTML")
+            except Exception:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="HTML")
         return ConversationHandler.END
 
-    user_data = get_user(uid)
-    if not user_data.get("username") or user_data["username"] != user.username:
-        user_data["username"] = user.username or user.first_name
-        save_user(uid, user_data)
-
-    role_label = get_role_label(uid, SUPER_ADMIN_ID)
-    welcome_text = (
-        f"🎮 **Bienvenue sur le Marketplace, {user.first_name} !**\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🎖️ **Rang :** {role_label}\n\n"
-        f"🤝 *Achetez et vendez vos comptes de jeux en toute sécurité.*\n\n"
-        f"👇 **Sélectionnez une option ci-dessous :**"
-    )
-    
-    reply_markup = get_main_menu_keyboard(uid, SUPER_ADMIN_ID)
-    
-    if update.callback_query:
-        # FIX SAFE RETOUR : Si on revient depuis un message avec photo, on nettoie pour éviter le crash
-        try:
-            await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-        except Exception:
-            await update.callback_query.message.delete()
-            await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-    return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"❌ Erreur critique dans start_command : {e}", exc_info=True)
 
 
 # ==================== LOGIQUE DE MODÉRATION SÉCURISÉE ====================
@@ -179,14 +191,12 @@ async def traitement_moderation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         db.annonces.update_one({"_id": ObjectId(annonce_id)}, {"$set": {"statut": "valide"}})
         db.users.update_one({"_id": vendeur_id}, {"$inc": {"annonces_publiees": 1}})
         
-        # FIX MODÉRATION VISUELLE : Choix dynamique selon la présence de photos
         txt_ok = f"🟢 **Annonce `{annonce_id}` approuvée et publiée !**"
         if query.message.photo:
             await query.message.edit_caption(caption=txt_ok, parse_mode="Markdown")
         else:
             await query.message.edit_text(txt_ok, parse_mode="Markdown")
         
-        # Publication automatique sur le canal public
         try:
             txt_canal = (
                 f"📢 **COMPTE DISPONIBLE SUR LE MARKETPLACE**\n"
@@ -441,6 +451,13 @@ async def executer_recherche(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ==================== GESTIONNAIRE D'ERREURS GLOBAL ====================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Intercepte et logue toutes les exceptions non gérées pour éviter le silence radio du bot."""
+    logger.error(msg="⚠️ Une exception non gérée a été interceptée :", exc_info=context.error)
+
+
 def main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -471,6 +488,9 @@ def main():
     application.add_handler(recherche_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Intégration du gestionnaire d'erreurs global
+    application.add_error_handler(error_handler)
     
     application.run_polling()
 
