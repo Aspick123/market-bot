@@ -196,12 +196,11 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📜 Consulter CGU", callback_data="nav:cgu"), 
          InlineKeyboardButton("📊 Leaderboard Ventes", callback_data="nav:leaderboard")],
         [InlineKeyboardButton("🎁 Liens Parrainage", callback_data="nav:parrainage"),
-         InlineKeyboardButton("🔔 Alertes Baisse de Prix", callback_data="nav:mes_alertes")],
+         InlineKeyboardButton("💼 Recrutement Staff", callback_data="nav:recrutement_public")],
         [InlineKeyboardButton("⚖️ Ouvrir un Litige / Recours", callback_data="nav:mes_litiges")],
         [InlineKeyboardButton("⚙️ Administration Générale", callback_data="nav:admin_root")]
     ]
 
-    # CORRECTION : Utilisation de edit_message_text sur le callback_query pour PTB v22+
     if update.callback_query:
         await update.callback_query.edit_message_text(text=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     else:
@@ -337,12 +336,18 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             elif cible == "admin_root":
                 if uid != SUPER_ADMIN_ID: return
                 cfg = db.config.find_one({"type": "global"})
-                txt_adm = f"🛠️ <b>PANEL D'ADMINISTRATION</b>\n\nMode Urgence : {cfg.get('mode_urgence')}\nRecrutement : {cfg.get('recrutement_ouvert')}"
-                kb = [[InlineKeyboardButton("🚨 Toggle Urgence", callback_data="admact:toggle_urg"), InlineKeyboardButton("📊 Exporter Audit TXT", callback_data="admact:export")],
-                      [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
+                txt_adm = (
+                    f"🛠️ <b>PANEL D'ADMINISTRATION SUPRÊME</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+                    f"🚨 Mode Urgence Global : <code>{'ACTIF 🔴' if cfg.get('mode_urgence') else 'INACTIF 🟢'}</code>\n"
+                    f"💼 Recrutements Modérateurs : <code>{'OUVERTS 🔓' if cfg.get('recrutement_ouvert') else 'FERMÉS 🔒'}</code>\n"
+                )
+                kb = [
+                    [InlineKeyboardButton("🚨 Basculer Urgence", callback_data="admact:toggle_urg"), 
+                     InlineKeyboardButton("💼 Basculer Recrutement", callback_data="admact:toggle_recrut")],
+                    [InlineKeyboardButton("📊 Exporter Audit TXT", callback_data="admact:export")],
+                    [InlineKeyboardButton("🔙 Menu Principal", callback_data="nav:retour")]
+                ]
                 await query.edit_message_text(txt_adm, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-            
-            # CORRECTION : Intégration complète des branchements manquants du menu principal
             elif cible == "mes_annonces":
                 mes_ann = list(db.annonces.find({"vendeur_id": uid}))
                 txt_ma = "📦 <b>VOS ANNONCES ENREGISTRÉES :</b>\n\n"
@@ -361,6 +366,13 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             elif cible == "mes_litiges":
                 db.users.update_one({"_id": uid}, {"$set": {"state": "LITIGE_INPUT_RECOURS"}})
                 await query.edit_message_text("⚖️ <b>OUVERTURE DE LITIGE SÉQUESTRE</b>\n\nExpliquez en un seul message l'anomalie constatée (ex: non-reception, mot de passe erroné) :", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "recrutement_public":
+                cfg = db.config.find_one({"type": "global"})
+                if cfg.get("recrutement_ouvert", False):
+                    txt_recr = "💼 <b>CAMPAGNE DE RECRUTEMENT OUVERTE !</b>\n\nL'équipe Bot Market cherche des intermédiaires et modérateurs pour gérer le flux des litiges d'Escrow.\n\n👉 Envoyez votre candidature motivée directement au Fondateur."
+                else:
+                    txt_recr = "❌ <b>RECRUTEMENT FERMÉ</b>\n\nAucune session de recrutement n'est active pour le moment. Suivez les annonces sur le canal !"
+                await query.edit_message_text(txt_recr, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]), parse_mode="HTML")
 
         elif prefix == "setprof":
             db.users.update_one({"_id": uid}, {"$set": {"state": f"SETPROF_{parts[1]}"}})
@@ -413,13 +425,34 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
                 await ctx.bot.send_message(chat_id=uid, text=txt_v, reply_markup=InlineKeyboardMarkup(kb_v))
 
         elif prefix == "admact":
-            if parts[1] == "toggle_urg":
+            if uid != SUPER_ADMIN_ID: return
+            act = parts[1]
+            
+            if act == "toggle_urg":
                 c = db.config.find_one({"type": "global"})
                 db.config.update_one({"type": "global"}, {"$set": {"mode_urgence": not c.get("mode_urgence")}})
-                await query.edit_message_text("Changement d'état appliqué pour l'urgence globale.")
-            elif parts[1] == "export":
+            elif act == "toggle_recrut":
+                c = db.config.find_one({"type": "global"})
+                db.config.update_one({"type": "global"}, {"$set": {"recrutement_ouvert": not c.get("recrutement_ouvert")}})
+            elif act == "export":
                 buf = io.BytesIO(b"RAPPORT COMPLET DE TRACABILITE ET AUDIT DE TRANSACTION ESCROW")
                 await ctx.bot.send_document(chat_id=uid, document=InputFile(buf, filename="audit_market.txt"))
+                return
+            
+            # Rafraîchissement synchrone immédiat du layout admin après interaction
+            cfg = db.config.find_one({"type": "global"})
+            txt_adm = (
+                f"🛠️ <b>PANEL D'ADMINISTRATION SUPRÊME</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+                f"🚨 Mode Urgence Global : <code>{'ACTIF 🔴' if cfg.get('mode_urgence') else 'INACTIF 🟢'}</code>\n"
+                f"💼 Recrutements Modérateurs : <code>{'OUVERTS 🔓' if cfg.get('recrutement_ouvert') else 'FERMÉS 🔒'}</code>\n"
+            )
+            kb = [
+                [InlineKeyboardButton("🚨 Basculer Urgence", callback_data="admact:toggle_urg"), 
+                 InlineKeyboardButton("💼 Basculer Recrutement", callback_data="admact:toggle_recrut")],
+                [InlineKeyboardButton("📊 Exporter Audit TXT", callback_data="admact:export")],
+                [InlineKeyboardButton("🔙 Menu Principal", callback_data="nav:retour")]
+            ]
+            await query.edit_message_text(txt_adm, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
         elif prefix == "escrowact":
             act, tx_id = parts[1], parts[2]
