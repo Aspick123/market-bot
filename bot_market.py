@@ -404,7 +404,7 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             db.config.update_one({"type": "global"}, {"$set": {"mode_urgence": not c.get("mode_urgence")}})
             await query.message.edit_text("Changement d'état appliqué pour l'urgence globale.")
         elif parts[1] == "export":
-            buf = io.BytesIO(b"RAPPORT COMPLÈT DE TRACABILITE ET AUDIT DE TRANSACTION ESCROW")
+            buf = io.BytesIO(b"RAPPORT COMPLET DE TRACABILITE ET AUDIT DE TRANSACTION ESCROW")
             await ctx.bot.send_document(chat_id=uid, document=InputFile(buf, filename="audit_market.txt"))
 
     # Actions liées au module d'Escrow Blockchain TON
