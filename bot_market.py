@@ -147,7 +147,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ <b>MAINTENANCE CRITIQUE ACTIVÉE.</b> Le bot est momentanément indisponible.")
         return
 
-    # Enregistrement initial ou synchronisation de l'utilisateur
     db.users.update_one(
         {"_id": uid},
         {
@@ -165,7 +164,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     u_curr = db.users.find_one({"_id": uid})
 
-    # Traitement Deep Linking (/start acheter_XXX ou /start ref_XXX)
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -203,8 +201,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⚙️ Administration Générale", callback_data="nav:admin_root")]
     ]
 
+    # CORRECTION : Utilisation de edit_message_text sur le callback_query pour PTB v22+
     if update.callback_query:
-        await update.callback_query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        await update.callback_query.edit_message_text(text=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
@@ -218,7 +217,6 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
     text = update.message.text
     photo = update.message.photo[-1].file_id if update.message.photo else None
 
-    # FSM : Tunnel de vente itératif
     if state.startswith("VENTE_"):
         ann = db.annonces.find_one({"vendeur_id": uid, "statut": "brouillon"})
         if not ann:
@@ -234,21 +232,20 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
         elif state == "VENTE_DESC" and text:
             db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"description": text}})
             db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_PHOTOS"}})
-            await update.message.reply_text("📸 <b>Étape 4/7 : Galerie d'images (Obligatoire)</b>\n\nEnvoyez vos captures d'écran de l'inventaire. Cliquez sur le bouton de fin lorsque vous avez terminé :", 
+            await update.message.reply_text("📸 <b>Étape 4/7 : Galerie d'images (Obligatoire)</b>\n\nEnvoyez vos captures d'écran. Cliquez sur le bouton ci-dessous une fois fini :", 
                                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏁 Finir l'envoi des images", callback_data="plat:fin_photos")]]), parse_mode="HTML")
         
         elif state == "VENTE_PHOTOS" and photo:
             db.annonces.update_one({"_id": ann["_id"]}, {"$push": {"photos": photo}})
-            await update.message.reply_text("✅ Image reçue et ajoutée à l'annonce. Envoyez-en d'autres ou validez.")
+            await update.message.reply_text("✅ Image reçue et ajoutée. Envoyez-en d'autres ou validez via le bouton.")
         
         elif state == "VENTE_PRIX" and text:
             db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"prix": text}})
             db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_DEVISE"}})
             kb = [[InlineKeyboardButton(d, callback_data=f"dev:{d}") for d in ["FCFA", "USDT", "EUR"]]]
-            await update.message.reply_text("💱 <b>Étape 6/7 : Devise</b>\n\nSélectionnez l'unité monétaire de l'échange :", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            await update.message.reply_text("💱 <b>Étape 6/7 : Devise</b>\n\nSélectionnez l'unité monétaire :", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
-    # FSM : Recherche d'annonces
     if state == "RECHERCHE_INPUT" and text:
         db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
         res = list(db.annonces.find({"statut": "approuve", "$or": [{"categorie": {"$regex": text, "$options": "i"}}, {"description": {"$regex": text, "$options": "i"}}]}))
@@ -262,10 +259,9 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
             await update.message.reply_text(txt_res, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
-    # FSM : Dépôt de preuves de Litige
     if state == "LITIGE_INPUT_RECOURS" and text:
         db.users.update_one({"_id": uid}, {"$set": {"state": "LITIGE_PROOFS", "tmp_litige_desc": text}})
-        await update.message.reply_text("📸 Veuillez désormais joindre une capture d'écran faisant office de preuve irréfutable :")
+        await update.message.reply_text("📸 Veuillez désormais joindre une capture d'écran faisant office de preuve :")
         return
 
     if state == "LITIGE_PROOFS" and photo:
@@ -275,20 +271,18 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
             "demandeur_id": uid, "description": desc, "preuve_photo": photo,
             "statut": "ouvert", "date_creation": time.time()
         })
-        await update.message.reply_text("⚖️ <b>Dossier transmis avec succès au arbitrage.</b> L'équipe va l'analyser sous peu.")
+        await update.message.reply_text("⚖️ <b>Dossier de litige transmis avec succès à l'arbitrage.</b> Une analyse est en cours.")
         return
 
-    # FSM : Configuration de Profil Vendeur
     if state.startswith("SETPROF_"):
         champ = state.split("_")[1]
         db.users.update_one({"_id": uid}, {"$set": {champ.lower(): text, "state": "IDLE"}})
-        await update.message.reply_text(f"✅ Variable de profil [<b>{champ}</b>] mise à jour avec succès !", parse_mode="HTML")
+        await update.message.reply_text(f"✅ Profil mis à jour [<b>{champ}</b>] !", parse_mode="HTML")
         return
 
-    # FSM : Ajout de l'adresse wallet de réception du vendeur
     if state == "SET_WALLET_VENDEUR" and text:
         db.users.update_one({"_id": uid}, {"$set": {"wallet_ton_adresse": text, "state": "IDLE"}})
-        await update.message.reply_text("🏦 Votre adresse de réception TON a été mémorisée. Les versements en attente vont s'exécuter.")
+        await update.message.reply_text("🏦 Votre adresse de réception TON a été mémorisée.")
         return
 
 # ==========================================
@@ -299,129 +293,149 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     data = query.data
     await query.answer()
     uid = update.effective_user.id
-    u = db.users.find_one({"_id": uid}) or {}
     
-    parts = data.split(":")
-    prefix = parts[0]
+    try:
+        u = db.users.find_one({"_id": uid}) or {}
+        parts = data.split(":")
+        prefix = parts[0]
 
-    if prefix == "nav":
-        cible = parts[1]
-        if cible == "retour":
-            await start(update, ctx)
-        elif cible == "recherche":
-            db.users.update_one({"_id": uid}, {"$set": {"state": "RECHERCHE_INPUT"}})
-            await query.message.edit_text("🔍 Saisissez le nom du jeu recherché :", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
-        elif cible == "vendre":
-            limite = db.config.find_one({"type": "global"}).get("limite_annonces_membre", 3)
-            if db.annonces.count_documents({"vendeur_id": uid, "statut": "approuve"}) >= limite:
-                await query.message.edit_text(f"⚠️ Quota maximum de {limite} annonces en ligne atteint.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]]))
-                return
-            db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_JEU"}})
-            await query.message.edit_text("🎮 <b>Étape 1/7 : Titre du jeu vidéo</b>\n\nQuel est le nom du jeu ?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]), parse_mode="HTML")
-        elif cible == "marche_global":
-            annonces = list(db.annonces.find({"statut": "approuve"}))
-            txt = "🛍️ <b>OFFRES DISPONIBLES EN DIRECT :</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            kb = []
-            for item in annonces:
-                txt += f"🔹 <b>{safe_html(item['categorie'])}</b> - <code>{safe_html(item['prix'])} {safe_html(item['devise'])}</code>\n"
-                kb.append([InlineKeyboardButton(f"👁️ Inspecter {item['categorie']} ({item['prix']})", callback_data=f"viewann:inspecte:{item['_id']}")])
-            kb.append([InlineKeyboardButton("🔙 Menu Principal", callback_data="nav:retour")])
-            await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-        elif cible == "mon_profil":
-            txt_prof = f"👤 <b>PROFIL COMMERCIAL</b>\n🌍 Nationalité : {safe_html(u.get('nationalite'))}\n📞 Téléphone : {safe_html(u.get('telephone'))}"
-            kb = [[InlineKeyboardButton("🌍 Configurer Pays", callback_data="setprof:NATIONALITE"), InlineKeyboardButton("📞 Configurer Mobile", callback_data="setprof:TELEPHONE")],
-                  [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
-            await query.message.edit_text(txt_prof, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-        elif cible == "leaderboard":
-            pipeline = [{"$match": {"statut": "vendu"}}, {"$group": {"_id": "$vendeur_id", "total": {"$sum": 1}}}, {"$sort": {"total": -1}}]
-            res = list(db.annonces.aggregate(pipeline))
-            txt_l = "📊 <b>MEILLEURS VENDEURS CERTIFIÉS :</b>\n\n"
-            for pos, r in enumerate(res):
-                txt_l += f"{pos+1}. Utilisateur {r['_id']} — {r['total']} transactions validées\n"
-            await query.message.edit_text(txt_l or "Aucune vente pour le moment.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]]))
-        elif cible == "admin_root":
-            if uid != SUPER_ADMIN_ID: return
-            cfg = db.config.find_one({"type": "global"})
-            txt_adm = f"🛠️ <b>PANEL D'ADMINISTRATION</b>\n\nMode Urgence : {cfg.get('mode_urgence')}\nRecrutement : {cfg.get('recrutement_ouvert')}"
-            kb = [[InlineKeyboardButton("🚨 Toggle Urgence", callback_data="admact:toggle_urg"), InlineKeyboardButton("📊 Exporter Audit TXT", callback_data="admact:export")],
-                  [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
-            await query.message.edit_text(txt_adm, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-
-    if prefix == "setprof":
-        db.users.update_one({"_id": uid}, {"$set": {"state": f"SETPROF_{parts[1]}"}})
-        await query.message.edit_text(f"✍️ Saisissez la nouvelle valeur pour {parts[1]} :")
-
-    if prefix == "plat":
-        if parts[1] == "fin_photos":
-            db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_PRIX"}})
-            await query.message.edit_text("💰 <b>Étape 5/7 : Tarification</b>\n\nDéfinissez votre prix d'échange (ex: 5000, 10, 100) :", parse_mode="HTML")
-        else:
-            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"plateforme": parts[1]}})
-            db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_DESC"}})
-            await query.message.edit_text("📝 <b>Étape 3/7 : Spécifications et Description complète</b>\n\nListez les détails du compte (personnages, inventaires, skins...) :", parse_mode="HTML")
-
-    if prefix == "dev":
-        db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"devise": parts[1], "statut": "en_attente", "date_creation": time.time()}})
-        db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
-        ann_creee = db.annonces.find_one({"vendeur_id": uid, "statut": "en_attente"}, sort=[("date_creation", -1)])
-        
-        # Soumission instantanée à la modération du Fondateur
-        txt_m = f"⚖️ <b>MODÉRATION REÇUE</b>\nJeu : {ann_creee['categorie']}\nPrix : {ann_creee['prix']} {parts[1]}"
-        kb_m = [[InlineKeyboardButton("✅ Publier", callback_data=f"modact:ok:{ann_creee['_id']}"), InlineKeyboardButton("❌ Rejeter", callback_data=f"modact:ko:{ann_creee['_id']}")]]
-        await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_m, reply_markup=InlineKeyboardMarkup(kb_m))
-        await query.message.edit_text("🎉 <b>Annonce envoyée à l'équipe !</b> Notification de validation imminente.")
-
-    if prefix == "modact":
-        act, id_a = parts[1], parts[2]
-        if act == "ok":
-            db.annonces.update_one({"_id": ObjectId(id_a)}, {"$set": {"statut": "approuve"}})
-            item = db.annonces.find_one({"_id": ObjectId(id_a)})
+        if prefix == "nav":
+            cible = parts[1]
+            if cible == "retour":
+                await start(update, ctx)
+            elif cible == "recherche":
+                db.users.update_one({"_id": uid}, {"$set": {"state": "RECHERCHE_INPUT"}})
+                await query.edit_message_text("🔍 Saisissez le nom du jeu recherché :", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
+            elif cible == "vendre":
+                limite = db.config.find_one({"type": "global"}).get("limite_annonces_membre", 3)
+                if db.annonces.count_documents({"vendeur_id": uid, "statut": "approuve"}) >= limite:
+                    await query.edit_message_text(f"⚠️ Quota maximum de {limite} annonces en ligne atteint.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]]))
+                    return
+                db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_JEU"}})
+                await query.edit_message_text("🎮 <b>Étape 1/7 : Titre du jeu vidéo</b>\n\nQuel est le nom du jeu ?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "marche_global":
+                annonces = list(db.annonces.find({"statut": "approuve"}))
+                txt = "🛍️ <b>OFFRES DISPONIBLES EN DIRECT :</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+                kb = []
+                for item in annonces:
+                    txt += f"🔹 <b>{safe_html(item['categorie'])}</b> - <code>{safe_html(item['prix'])} {safe_html(item['devise'])}</code>\n"
+                    kb.append([InlineKeyboardButton(f"👁️ Inspecter {item['categorie']} ({item['prix']})", callback_data=f"viewann:inspecte:{item['_id']}")])
+                kb.append([InlineKeyboardButton("🔙 Menu Principal", callback_data="nav:retour")])
+                await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            elif cible == "mon_profil":
+                txt_prof = f"👤 <b>PROFIL COMMERCIAL</b>\n🌍 Nationalité : {safe_html(u.get('nationalite'))}\n📞 Téléphone : {safe_html(u.get('telephone'))}"
+                kb = [[InlineKeyboardButton("🌍 Configurer Pays", callback_data="setprof:NATIONALITE"), InlineKeyboardButton("📞 Configurer Mobile", callback_data="setprof:TELEPHONE")],
+                      [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
+                await query.edit_message_text(txt_prof, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            elif cible == "leaderboard":
+                pipeline = [{"$match": {"statut": "vendu"}}, {"$group": {"_id": "$vendeur_id", "total": {"$sum": 1}}}, {"$sort": {"total": -1}}]
+                res = list(db.annonces.aggregate(pipeline))
+                txt_l = "📊 <b>MEILLEURS VENDEURS CERTIFIÉS :</b>\n\n"
+                for pos, r in enumerate(res):
+                    txt_l += f"{pos+1}. Utilisateur {r['_id']} — {r['total']} transactions validées\n"
+                await query.edit_message_text(txt_l or "Aucune vente pour le moment.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]]))
+            elif cible == "admin_root":
+                if uid != SUPER_ADMIN_ID: return
+                cfg = db.config.find_one({"type": "global"})
+                txt_adm = f"🛠️ <b>PANEL D'ADMINISTRATION</b>\n\nMode Urgence : {cfg.get('mode_urgence')}\nRecrutement : {cfg.get('recrutement_ouvert')}"
+                kb = [[InlineKeyboardButton("🚨 Toggle Urgence", callback_data="admact:toggle_urg"), InlineKeyboardButton("📊 Exporter Audit TXT", callback_data="admact:export")],
+                      [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
+                await query.edit_message_text(txt_adm, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
             
-            txt_pub = f"📣 <b>DISPONIBLE EN ESCROW SÉCURISÉ</b>\n🎮 Jeu : #{item['categorie']}\n💰 Prix : {item['prix']} {item['devise']}\n📝 Description : {item['description']}"
-            kb_pub = [[InlineKeyboardButton("🛒 Acheter via le Séquestre", url=f"https://t.me/{ctx.bot.username}?start=acheter_{item['_id']}")]]
-            
-            if item.get("photos"):
-                await ctx.bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["photos"][0], caption=txt_pub, reply_markup=InlineKeyboardMarkup(kb_pub))
+            # CORRECTION : Intégration complète des branchements manquants du menu principal
+            elif cible == "mes_annonces":
+                mes_ann = list(db.annonces.find({"vendeur_id": uid}))
+                txt_ma = "📦 <b>VOS ANNONCES ENREGISTRÉES :</b>\n\n"
+                for a in mes_ann:
+                    txt_ma += f"• {safe_html(a['categorie'])} — {safe_html(a['prix'])} {safe_html(a['devise'])} ({safe_html(a['statut'])})\n"
+                if not mes_ann: txt_ma += "Aucune annonce déposée pour le moment."
+                await query.edit_message_text(txt_ma, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "cgu":
+                cfg = db.config.find_one({"type": "global"})
+                await query.edit_message_text(f"📜 <b>CGU & SÉCURITÉ DE L'ESCROW</b>\n\n{safe_html(cfg.get('cgu_text'))}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "parrainage":
+                link = f"https://t.me/{ctx.bot.username}?start=ref_{uid}"
+                await query.edit_message_text(f"🎁 <b>SYSTÈME DE PARRAINAGE COMMERCIAL</b>\n\nInvitez vos collègues et recevez automatiquement 50 points cumulables :\n\n<code>{link}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "mes_alertes":
+                await query.edit_message_text("🔔 <b>ALERTES DE PRIX</b>\n\nCe module d'analyse automatisé est en cours de déploiement.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]), parse_mode="HTML")
+            elif cible == "mes_litiges":
+                db.users.update_one({"_id": uid}, {"$set": {"state": "LITIGE_INPUT_RECOURS"}})
+                await query.edit_message_text("⚖️ <b>OUVERTURE DE LITIGE SÉQUESTRE</b>\n\nExpliquez en un seul message l'anomalie constatée (ex: non-reception, mot de passe erroné) :", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]), parse_mode="HTML")
+
+        elif prefix == "setprof":
+            db.users.update_one({"_id": uid}, {"$set": {"state": f"SETPROF_{parts[1]}"}})
+            await query.edit_message_text(f"✍️ Saisissez la nouvelle valeur pour {parts[1]} :")
+
+        elif prefix == "plat":
+            if parts[1] == "fin_photos":
+                db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_PRIX"}})
+                await query.edit_message_text("💰 <b>Étape 5/7 : Tarification</b>\n\nDéfinissez votre prix d'échange (ex: 5000, 10, 100) :", parse_mode="HTML")
             else:
-                await ctx.bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=txt_pub, reply_markup=InlineKeyboardMarkup(kb_pub))
-            await query.message.edit_text("🟢 Annonce déployée sur le canal officiel.")
-        else:
-            db.annonces.update_one({"_id": ObjectId(id_a)}, {"$set": {"statut": "rejete"}})
-            await query.message.edit_text("❌ Offre rejetée.")
+                db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"plateforme": parts[1]}})
+                db.users.update_one({"_id": uid}, {"$set": {"state": "VENTE_DESC"}})
+                await query.edit_message_text("📝 <b>Étape 3/7 : Spécifications et Description complète</b>\n\nListez les détails du compte (personnages, inventaires, skins...) :", parse_mode="HTML")
 
-    if prefix == "viewann":
-        item = db.annonces.find_one({"_id": ObjectId(parts[2])})
-        txt_v = f"🎮 Fiche : {item['categorie']}\nTarif : {item['prix']} {item['devise']}\nDétails : {item['description']}"
-        kb_v = [[InlineKeyboardButton("🤝 Lancer l'achat sécurisé", url=f"https://t.me/{ctx.bot.username}?start=acheter_{item['_id']}")] ]
-        if item.get("photos"):
-            await ctx.bot.send_photo(chat_id=uid, photo=item["photos"][0], caption=txt_v, reply_markup=InlineKeyboardMarkup(kb_v))
-        else:
-            await ctx.bot.send_message(chat_id=uid, text=txt_v, reply_markup=InlineKeyboardMarkup(kb_v))
+        elif prefix == "dev":
+            db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"devise": parts[1], "statut": "en_attente", "date_creation": time.time()}})
+            db.users.update_one({"_id": uid}, {"$set": {"state": "IDLE"}})
+            ann_creee = db.annonces.find_one({"vendeur_id": uid, "statut": "en_attente"}, sort=[("date_creation", -1)])
+            
+            txt_m = f"⚖️ <b>MODÉRATION REÇUE</b>\nJeu : {ann_creee['categorie']}\nPrix : {ann_creee['prix']} {parts[1]}"
+            kb_m = [[InlineKeyboardButton("✅ Publier", callback_data=f"modact:ok:{ann_creee['_id']}"), InlineKeyboardButton("❌ Rejeter", callback_data=f"modact:ko:{ann_creee['_id']}")]]
+            await ctx.bot.send_message(chat_id=SUPER_ADMIN_ID, text=txt_m, reply_markup=InlineKeyboardMarkup(kb_m))
+            await query.edit_message_text("🎉 <b>Annonce envoyée à l'équipe !</b> Notification de validation imminente.")
 
-    if prefix == "admact":
-        if parts[1] == "toggle_urg":
-            c = db.config.find_one({"type": "global"})
-            db.config.update_one({"type": "global"}, {"$set": {"mode_urgence": not c.get("mode_urgence")}})
-            await query.message.edit_text("Changement d'état appliqué pour l'urgence globale.")
-        elif parts[1] == "export":
-            # CORRECTION : Suppression de l'accent sur COMPLET pour éviter l'erreur ASCII de Render
-            buf = io.BytesIO(b"RAPPORT COMPLET DE TRACABILITE ET AUDIT DE TRANSACTION ESCROW")
-            await ctx.bot.send_document(chat_id=uid, document=InputFile(buf, filename="audit_market.txt"))
+        elif prefix == "modact":
+            act, id_a = parts[1], parts[2]
+            if act == "ok":
+                db.annonces.update_one({"_id": ObjectId(id_a)}, {"$set": {"statut": "approuve"}})
+                item = db.annonces.find_one({"_id": ObjectId(id_a)})
+                
+                txt_pub = f"📣 <b>DISPONIBLE EN ESCROW SÉCURISÉ</b>\n🎮 Jeu : #{item['categorie']}\n💰 Prix : {item['prix']} {item['devise']}\n📝 Description : {item['description']}"
+                kb_pub = [[InlineKeyboardButton("🛒 Acheter via le Séquestre", url=f"https://t.me/{ctx.bot.username}?start=acheter_{item['_id']}")]]
+                
+                if item.get("photos"):
+                    await ctx.bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["photos"][0], caption=txt_pub, reply_markup=InlineKeyboardMarkup(kb_pub))
+                else:
+                    await ctx.bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=txt_pub, reply_markup=InlineKeyboardMarkup(kb_pub))
+                await query.edit_message_text("🟢 Annonce déployée sur le canal officiel.")
+            else:
+                db.annonces.update_one({"_id": ObjectId(id_a)}, {"$set": {"statut": "rejete"}})
+                await query.edit_message_text("❌ Offre rejetée.")
 
-    # Actions liées au module d'Escrow Blockchain TON
-    if prefix == "escrowact":
-        act, tx_id = parts[1], parts[2]
-        if act == "conf_vendeur":
-            db.escrows.update_one({"_id": tx_id}, {"$set": {"confirmation_vendeur": True}})
-            await query.message.edit_text("⏳ Prise en compte de votre livraison. En attente de l'acheteur.")
-        elif act == "conf_acheteur":
-            db.escrows.update_one({"_id": tx_id}, {"$set": {"confirmation_acheteur": True}})
-            await query.message.edit_text("⏳ Confirmation enregistrée. Libération imminente des jetons cryptographiques.")
-        
-        # Vérification de clôture bilatérale
-        esc_up = db.escrows.find_one({"_id": tx_id})
-        if esc_up.get("confirmation_vendeur") and esc_up.get("confirmation_acheteur"):
-            await executer_deblocage_fonds_ton(ctx.bot, tx_id, esc_up)
+        elif prefix == "viewann":
+            item = db.annonces.find_one({"_id": ObjectId(parts[2])})
+            txt_v = f"🎮 Fiche : {item['categorie']}\nTarif : {item['prix']} {item['devise']}\nDétails : {item['description']}"
+            kb_v = [[InlineKeyboardButton("🤝 Lancer l'achat sécurisé", url=f"https://t.me/{ctx.bot.username}?start=acheter_{item['_id']}")] ]
+            if item.get("photos"):
+                await ctx.bot.send_photo(chat_id=uid, photo=item["photos"][0], caption=txt_v, reply_markup=InlineKeyboardMarkup(kb_v))
+            else:
+                await ctx.bot.send_message(chat_id=uid, text=txt_v, reply_markup=InlineKeyboardMarkup(kb_v))
+
+        elif prefix == "admact":
+            if parts[1] == "toggle_urg":
+                c = db.config.find_one({"type": "global"})
+                db.config.update_one({"type": "global"}, {"$set": {"mode_urgence": not c.get("mode_urgence")}})
+                await query.edit_message_text("Changement d'état appliqué pour l'urgence globale.")
+            elif parts[1] == "export":
+                buf = io.BytesIO(b"RAPPORT COMPLET DE TRACABILITE ET AUDIT DE TRANSACTION ESCROW")
+                await ctx.bot.send_document(chat_id=uid, document=InputFile(buf, filename="audit_market.txt"))
+
+        elif prefix == "escrowact":
+            act, tx_id = parts[1], parts[2]
+            if act == "conf_vendeur":
+                db.escrows.update_one({"_id": tx_id}, {"$set": {"confirmation_vendeur": True}})
+                await query.edit_message_text("⏳ Prise en compte de votre livraison. En attente de l'acheteur.")
+            elif act == "conf_acheteur":
+                db.escrows.update_one({"_id": tx_id}, {"$set": {"confirmation_acheteur": True}})
+                await query.edit_message_text("⏳ Confirmation enregistrée. Libération imminente des jetons cryptographiques.")
+            
+            esc_up = db.escrows.find_one({"_id": tx_id})
+            if esc_up.get("confirmation_vendeur") and esc_up.get("confirmation_acheteur"):
+                await executer_deblocage_fonds_ton(ctx.bot, tx_id, esc_up)
+                
+    except Exception as e:
+        log.error(f"Erreur d'exécution Callback : {e}")
 
 # ==========================================
 # 8. LOGIQUE D'ARBITRAGE ET DE SÉQUESTRE TON
@@ -435,11 +449,8 @@ async def initier_demande_achat_escrow(update: Update, ctx: ContextTypes.DEFAULT
 
     num = db.escrows.count_documents({}) + 1
     escrow_id = f"ESC{num:04d}"
-    
-    # CORRECTION : Ligne ré-assemblée correctement
     memo = generer_memo(escrow_id)
     
-    # Conversion de prix illustrative pour la blockchain TON
     montant_ton = 5.0
     commission = round(montant_ton * 0.05, 4)
     montant_vendeur = round(montant_ton - commission, 4)
@@ -474,14 +485,8 @@ async def executer_deblocage_fonds_ton(bot, escrow_id, escrow):
         db.escrows.update_one({"_id": escrow_id}, {"$set": {"statut": "attente_wallet_vendeur"}})
         return
 
-    # Routage / Envoi réel de la transaction signée via TON Center API
     try:
         from tonsdk.contract.wallet import Wallets, WalletVersionEnum
-        from tonsdk.utils import to_nano, bytes_to_b64str
-        mnemonics = TON_PRIVATE_KEY.split()
-        _m, pub, priv, wallet = Wallets.from_mnemonics(mnemonics, WalletVersionEnum.v4r2, 0)
-        
-        # Construction et envoi du Boc simulé / réel selon la connectivité active
         headers = {"X-API-Key": TONCENTER_API_KEY, "Content-Type": "application/json"}
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{TONCENTER_URL}/sendBoc", headers=headers, json={"boc": "MOCK_BOC_PAYLOAD"}, timeout=10) as r:
@@ -514,7 +519,6 @@ async def matcher_paiement(bot, transactions: list):
                     db.escrows.update_one({"_id": escrow["_id"]}, {"$set": {"statut": "expire"}})
                     continue
                 
-                # Validation positive de la transaction captée
                 db.escrows.update_one({"_id": escrow["_id"]}, {"$set": {"statut": "fonds_bloques", "tx_hash": tx_hash}})
                 
                 kb_a = [[InlineKeyboardButton("✅ Marquer conforme", callback_data=f"escrowact:conf_acheteur:{escrow['_id']}"), InlineKeyboardButton("🚨 Litige", callback_data="nav:mes_litiges")]]
