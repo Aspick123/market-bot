@@ -1,4 +1,4 @@
-python-telegram-bot==20.8
+python-telegram-bot==22.8
 pymongo==4.6.3
 aiohttp==3.9.5
 tonsdk==1.0.2
