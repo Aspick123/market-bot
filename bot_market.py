@@ -57,7 +57,7 @@ log = logging.getLogger("BotMarket")
 #  CONFIGURATION
 # ══════════════════════════════════════════════════════════════
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEf5EcX6TzgGsaT8KZWRiAEK42h4FJjc0k")
+BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEnLhcBXGUEoPMauQx8iP3TYvC2xMwkodU")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID", "@comptedejeux")
 TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
