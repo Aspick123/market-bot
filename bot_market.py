@@ -245,6 +245,31 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 #  TUNNEL DE VENTE
 # ══════════════════════════════════════════════════════════════
 
+ETAPES_PROMPTS = {
+    "VENTE_JEU": "🎮 <b>Étape 1/7 : Nom du Jeu</b>\n\nQuel est le nom exact du jeu vidéo ?",
+    "VENTE_PLATEFORME": "📱 <b>Étape 2/7 : Plateforme</b>\n\nSélectionne le support du compte :",
+    "VENTE_DESC": "📝 <b>Étape 3/7 : Description</b>\n\nDécrivez le compte :",
+    "VENTE_PHOTOS": "📸 <b>Étape 4/7 : Photos</b>\n\nEnvoyez vos photos puis cliquez Terminer :",
+    "VENTE_PRIX": "💰 <b>Étape 5/7 : Prix</b>\n\nMontant (ex: 15000, 25, 100) :",
+    "VENTE_DEVISE": "💱 <b>Étape 6/7 : Devise</b>\n\nÉcris la devise de ton prix (ex: FCFA, Euro, Dollar...) :",
+}
+
+def kb_reprise(state):
+    boutons_specifiques = []
+    if state == "VENTE_PLATEFORME":
+        boutons_specifiques = [[InlineKeyboardButton(p, callback_data=f"plat:{p}") for p in ["Android", "iOS", "PC", "Console"]]]
+    elif state == "VENTE_PHOTOS":
+        boutons_specifiques = [[InlineKeyboardButton("🏁 Terminer", callback_data="plat:fin_photos")]]
+    boutons_specifiques.append([
+        InlineKeyboardButton("🔄 Recommencer de zéro", callback_data="nav:recommencer_vente"),
+        InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")
+    ])
+    return InlineKeyboardMarkup(boutons_specifiques)
+
+async def reprendre_etape(message, state):
+    txt = ETAPES_PROMPTS.get(state, "Continue ta vente en cours ou recommence.")
+    await message.reply_text(f"↩️ <b>Reprise de ta vente en cours</b>\n\n{txt}", parse_mode="HTML", reply_markup=kb_reprise(state))
+
 async def executer_tunnel_vente(update, ctx, uid, text=None, photo_id=None):
     u = get_user(uid)
     state = u.get("state", "IDLE")
@@ -253,10 +278,13 @@ async def executer_tunnel_vente(update, ctx, uid, text=None, photo_id=None):
     if not ann:
         db.annonces.insert_one({"vendeur_id": uid, "statut": "brouillon", "photos": [], "booste": False, "date_creation": time.time()})
         save_user(uid, {"state": "VENTE_JEU"})
-        await update.effective_message.reply_text(
-            "🎮 <b>Étape 1/7 : Nom du Jeu</b>\n\nQuel est le nom exact du jeu vidéo ?",
-            parse_mode="HTML",
+        await update.effective_message.reply_text(ETAPES_PROMPTS["VENTE_JEU"], parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")]]))
+        return
+
+    # Reprise : bouton "Déposer Annonce" re-cliqué sans texte/photo => brouillon déjà existant
+    if text is None and photo_id is None:
+        await reprendre_etape(update.effective_message, state)
         return
 
     if state == "VENTE_JEU" and text:
@@ -683,6 +711,7 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("🔄 Recrutement", callback_data="admact:toggle_rec"),
                    InlineKeyboardButton("🚨 Urgence", callback_data="admact:toggle_urg")])
         kb.append([InlineKeyboardButton("👥 Gérer Rôles", callback_data="admact:gerer_roles")])
+        kb.append([InlineKeyboardButton("📇 Liste des membres", callback_data="admact:voir_membres_0")])
         kb.append([InlineKeyboardButton("⚙️ Config Générale", callback_data="admact:config")])
         kb.append([InlineKeyboardButton("💰 Config TON", callback_data="admact:config_ton")])
         kb.append([InlineKeyboardButton("📊 Stats & Export", callback_data="admact:export_pdf")])
@@ -835,7 +864,14 @@ async def handle_view_annonce(query, ctx, parts):
         return
 
     bot_username = (await ctx.bot.get_me()).username
-    txt = f"🎮 <b>{safe_html(item.get('categorie'))}</b>\n\nPrix : {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n{safe_html(item.get('description',''))}"
+    vendeur_info = get_user(item.get("vendeur_id"))
+    txt = (
+        f"🎮 <b>{safe_html(item.get('categorie'))}</b>\n\n"
+        f"Prix : {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n"
+        f"{safe_html(item.get('description',''))}\n\n"
+        f"👤 Vendeur : @{safe_html(vendeur_info.get('username','?'))}\n"
+        f"🆔 Identifiant : <code>{item.get('vendeur_id')}</code>"
+    )
     kb = [[InlineKeyboardButton("🤝 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")]]
     try:
         if item.get("photos"):
@@ -857,12 +893,15 @@ async def proposer_choix_achat(message, ctx, id_ann, uid):
     if ann.get("vendeur_id") == uid:
         await message.reply_text("⚠️ Tu ne peux pas acheter ta propre annonce."); return
 
+    vendeur_info = get_user(ann["vendeur_id"])
     kb = [[
         InlineKeyboardButton("🤝 Direct (sans frais)", callback_data=f"achatchoice:direct:{oid}"),
         InlineKeyboardButton("🔒 Escrow sécurisé", callback_data=f"achatchoice:escrow:{oid}")
     ]]
     await message.reply_text(
         f"🛒 <b>{safe_html(ann.get('categorie'))}</b>\n💰 {safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}\n\n"
+        f"👤 <b>Vendeur :</b> @{safe_html(vendeur_info.get('username','?'))}\n"
+        f"🆔 <b>Identifiant :</b> <code>{ann['vendeur_id']}</code>\n\n"
         f"Comment veux-tu procéder ?\n\n"
         f"🤝 <b>Direct</b> : tu négocies seul avec le vendeur, aucune protection.\n"
         f"🔒 <b>Escrow</b> : le bot bloque les fonds jusqu'à confirmation, plus sûr (petite commission).",
@@ -958,7 +997,14 @@ async def handle_role_action(query, ctx, uid, parts):
     if uid != SUPER_ADMIN_ID:
         await query.answer("🚫 Réservé au Fondateur.", show_alert=True); return
     act = parts[1]
-    if act == "promouvoir_admin":
+    if act == "promouvoir_gerant":
+        target = int(parts[2])
+        save_user(target, {"role": "gerant"})
+        log_audit("PROMOTION_GERANT", str(target), uid)
+        try: await ctx.bot.send_message(target, "🎉 Tu as été nommé Gérant du Marketplace ! Tape /start.")
+        except Exception: pass
+        await query.message.reply_text(f"✅ {target} promu Gérant.")
+    elif act == "promouvoir_admin":
         target = int(parts[2])
         save_user(target, {"role": "admin"})
         log_audit("PROMOTION_ADMIN", str(target), uid)
@@ -1049,6 +1095,36 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "ajouter_bl":
         save_user(uid, {"state": "ADMIN_BL_ID"})
         await safe_edit(query, "🚫 Tape l'ID Telegram à blacklister :")
+
+    elif act.startswith("voir_membres_"):
+        if uid != SUPER_ADMIN_ID:
+            await query.answer("🚫 Superadmin uniquement.", show_alert=True); return
+        page = int(act.replace("voir_membres_", ""))
+        per_page = 10
+        total = db.users.count_documents({})
+        membres = list(db.users.find({}).sort("date_inscription", -1).skip(page * per_page).limit(per_page))
+        txt = f"📇 <b>Membres</b> ({total} total) — page {page + 1}\n\n"
+        kb = []
+        for m in membres:
+            mid = m["_id"]
+            role_m = get_role(mid, m)
+            txt += f"🆔 <code>{mid}</code> — @{safe_html(m.get('username','?'))} — {ROLE_LABEL.get(role_m,'?')}\n"
+            if role_m == "membre":
+                kb.append([InlineKeyboardButton(f"🎯 Gérant ← {mid}", callback_data=f"roleact:promouvoir_gerant:{mid}")])
+            elif role_m == "gerant":
+                kb.append([InlineKeyboardButton(f"⬇️ Rétrograder {mid}", callback_data=f"roleact:retrograder:{mid}"),
+                           InlineKeyboardButton(f"⚙️ Admin {mid}", callback_data=f"roleact:promouvoir_admin:{mid}")])
+            elif role_m == "admin":
+                kb.append([InlineKeyboardButton(f"⬇️ Rétrograder {mid}", callback_data=f"roleact:retrograder:{mid}")])
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"admact:voir_membres_{page-1}"))
+        if (page + 1) * per_page < total:
+            nav_row.append(InlineKeyboardButton("▶️ Suivant", callback_data=f"admact:voir_membres_{page+1}"))
+        if nav_row:
+            kb.append(nav_row)
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
     elif act == "gerer_roles":
         if uid != SUPER_ADMIN_ID:
