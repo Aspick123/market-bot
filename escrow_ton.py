@@ -228,7 +228,12 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
 
     fallback_note = "\n⚠️ <i>(taux de secours utilisé — APIs temporairement indisponibles)</i>" if fallback else ""
 
+    nanotons = int(ton_amount * 1_000_000_000)
+    lien_tonkeeper = f"https://app.tonkeeper.com/transfer/{TON_WALLET_ADDRESS}?amount={nanotons}&text={memo}"
+
     kb = [[
+        InlineKeyboardButton("📲 Payer avec Tonkeeper (pré-rempli)", url=lien_tonkeeper)
+    ], [
         InlineKeyboardButton("❌ Annuler", callback_data=f"tonact:annuler:{escrow_id}")
     ]]
     await bot.send_message(
@@ -237,11 +242,11 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         f"💰 <b>Montant à envoyer : {ton_amount} TON</b>\n"
         f"<i>(≈ {montant_num} {code} au cours actuel)</i>{fallback_note}\n\n"
-        f"🏦 <b>Adresse wallet du bot :</b>\n<code>{TON_WALLET_ADDRESS}</code>\n\n"
-        f"💬 <b>Mémo OBLIGATOIRE :</b>\n<code>{memo}</code>\n\n"
-        f"⚠️ <i>Sans le mémo, le paiement ne sera pas reconnu !</i>\n\n"
-        f"⏳ Tu as <b>{TIMEOUT_PAIEMENT_MIN} minutes</b> pour transférer.\n"
-        f"📲 Utilise Tonkeeper ou le Wallet Telegram.",
+        f"📲 <b>Le plus simple :</b> clique sur le bouton Tonkeeper ci-dessous,\n"
+        f"tout sera pré-rempli (adresse, montant, mémo) !\n\n"
+        f"🏦 <i>Ou manuellement :</i>\n<code>{TON_WALLET_ADDRESS}</code>\n"
+        f"💬 Mémo : <code>{memo}</code>\n\n"
+        f"⏳ Tu as <b>{TIMEOUT_PAIEMENT_MIN} minutes</b> pour transférer.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
     )
     return escrow_id
@@ -422,9 +427,12 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
     vendeur_wallet = from_db_users.get("wallet_ton")
 
     if not vendeur_wallet:
+        kb_aide = [[InlineKeyboardButton("📲 Ouvrir Tonkeeper pour copier mon adresse", url="https://app.tonkeeper.com/")]]
         try:
             await bot.send_message(esc["vendeur_id"],
-                f"💰 <b>Transaction confirmée !</b>\n\nPour recevoir {montant_vendeur} TON, envoie ton adresse wallet TON :")
+                f"💰 <b>Transaction confirmée !</b>\n\nPour recevoir {montant_vendeur} TON, envoie ton adresse wallet TON.\n\n"
+                f"💡 Ouvre Tonkeeper, copie ton adresse (icône 📋 en haut), puis colle-la ici :",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_aide))
         except Exception: pass
         save_escrow_update(escrow_id, {"statut": "attente_wallet_vendeur", "montant_vendeur_calc": montant_vendeur,
                                        "commission_calc": commission})
