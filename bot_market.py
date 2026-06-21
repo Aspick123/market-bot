@@ -106,6 +106,24 @@ def safe_html(text) -> str:
     if text is None: return ""
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
+def decouper_texte(texte: str, taille_max: int = 3500) -> list:
+    """Découpe un texte long en plusieurs morceaux pour respecter la limite Telegram (4096 car.)."""
+    if len(texte) <= taille_max:
+        return [texte]
+    chunks = []
+    while texte:
+        if len(texte) <= taille_max:
+            chunks.append(texte)
+            break
+        coupe = texte.rfind("\n\n", 0, taille_max)
+        if coupe == -1:
+            coupe = texte.rfind("\n", 0, taille_max)
+        if coupe <= 0:
+            coupe = taille_max
+        chunks.append(texte[:coupe])
+        texte = texte[coupe:].lstrip("\n")
+    return chunks
+
 def get_config() -> dict:
     cfg = db.config.find_one({"type": "global"}) or {}
     return {**DEFAULTS_CONFIG, **cfg}
@@ -317,8 +335,7 @@ async def executer_tunnel_vente(update, ctx, uid, text=None, photo_id=None):
         save_user(uid, {"state": "IDLE"})
         await soumettre_a_moderation(update.effective_message, ctx, ann["_id"])
     else:
-        save_user(uid, {"state": "IDLE"})
-        await update.effective_message.reply_text("⚠️ Étape incohérente. Relance /vendre.")
+        await reprendre_etape(update.effective_message, state)
 
 async def soumettre_a_moderation(message, ctx, ann_id):
     ann = db.annonces.find_one({"_id": ann_id})
@@ -556,6 +573,13 @@ async def handle_nav(query, ctx, uid, u, parts):
         save_user(uid, {"state": "IDLE"})
         await safe_edit(query, "❌ Annulé.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
+    elif cible == "recommencer_vente":
+        db.annonces.delete_one({"vendeur_id": uid, "statut": "brouillon"})
+        save_user(uid, {"state": "IDLE"})
+        class FakeUpdate: pass
+        fu = FakeUpdate(); fu.effective_message = query.message
+        await executer_tunnel_vente(fu, ctx, uid)
+
     elif cible == "recherche":
         save_user(uid, {"state": "RECHERCHE_INPUT"})
         await safe_edit(query, "🔍 Mot-clé recherché :", InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
@@ -633,8 +657,16 @@ async def handle_nav(query, ctx, uid, u, parts):
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
     elif cible == "cgu":
-        txt = f"📜 <b>CGU & CGV</b>\n\n{safe_html(cfg.get('cgu_text',''))}"
-        await safe_edit(query, txt, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
+        texte_complet = safe_html(cfg.get('cgu_text', ''))
+        chunks = decouper_texte(texte_complet, 3500)
+        for i, chunk in enumerate(chunks):
+            entete = "📜 <b>CGU & CGV</b>\n\n" if i == 0 else f"📜 <i>(suite {i+1}/{len(chunks)})</i>\n\n"
+            is_last = (i == len(chunks) - 1)
+            kb_chunk = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]) if is_last else None
+            try:
+                await query.message.reply_text(entete + chunk, parse_mode="HTML", reply_markup=kb_chunk)
+            except Exception as e:
+                log.error(f"Erreur envoi CGU chunk {i} : {e}")
 
     elif cible == "leaderboard":
         pipeline = [{"$match": {"statut": "vendu"}}, {"$group": {"_id": "$vendeur_id", "total": {"$sum": 1}}}, {"$sort": {"total": -1}}, {"$limit": 5}]
@@ -716,6 +748,8 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("💰 Config TON", callback_data="admact:config_ton")])
         kb.append([InlineKeyboardButton("📊 Stats & Export", callback_data="admact:export_pdf")])
         kb.append([InlineKeyboardButton("📜 Audit Log", callback_data="admact:audit_log")])
+        kb.append([InlineKeyboardButton("📤 Exporter & nettoyer Audit Log", callback_data="admact:export_audit_log")])
+        kb.append([InlineKeyboardButton("📤 Exporter & nettoyer Litiges résolus", callback_data="admact:export_litiges_resolus")])
         kb.append([InlineKeyboardButton("💸 Rémunération équipe", callback_data="tonact:rapport_remuneration")])
     kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
     await safe_edit(query, txt, InlineKeyboardMarkup(kb))
@@ -726,7 +760,8 @@ async def handle_setprof(query, ctx, uid, parts):
     champ = parts[1]
     if champ == "WALLET_TON":
         ctx.user_data["ton_state"] = "saisir_wallet_ton"
-        await safe_edit(query, "💼 Envoie ton adresse wallet TON (commence par EQ ou UQ) :")
+        kb_aide = InlineKeyboardMarkup([[InlineKeyboardButton("📲 Ouvrir Tonkeeper pour copier mon adresse", url="https://app.tonkeeper.com/")]])
+        await safe_edit(query, "💼 Envoie ton adresse wallet TON (commence par EQ ou UQ) :\n\n💡 Ouvre Tonkeeper, copie ton adresse, puis colle-la ici.", kb_aide)
         return
     save_user(uid, {"state": f"SETPROF_{champ}"})
     await safe_edit(query, f"✍️ Nouvelle valeur pour : <b>{champ}</b>")
@@ -1191,6 +1226,53 @@ async def handle_admin_action(query, ctx, uid, parts):
             txt += f"🕐 {l.get('date')} — {l.get('action')} par <code>{l.get('acted_by')}</code>\n{safe_html(l.get('details',''))[:60]}\n\n"
         await safe_edit(query, txt or "Aucune action.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]]))
 
+    elif act == "export_audit_log":
+        if uid != SUPER_ADMIN_ID: return
+        tous_logs = list(db.audit_logs.find({}).sort("timestamp", 1))
+        if not tous_logs:
+            await query.message.reply_text("✅ Aucun log à exporter, rien à nettoyer.")
+            return
+        buffer = io.BytesIO()
+        buffer.write(f"AUDIT LOG COMPLET — exporté le {fmt_date()}\n{'='*40}\n\n".encode())
+        ids_a_supprimer = []
+        for l in tous_logs:
+            buffer.write(f"{l.get('date')} | {l.get('action')} | par {l.get('acted_by')} | {l.get('details','')}\n".encode())
+            ids_a_supprimer.append(l["_id"])
+        buffer.seek(0)
+        try:
+            await ctx.bot.send_document(uid, document=InputFile(buffer, filename=f"audit_log_{fmt_date()}.txt"),
+                                        caption=f"📜 {len(tous_logs)} entrées exportées. Suppression de la base en cours...")
+            db.audit_logs.delete_many({"_id": {"$in": ids_a_supprimer}})
+            await query.message.reply_text(f"✅ {len(ids_a_supprimer)} entrées supprimées de MongoDB, espace libéré !")
+        except Exception as e:
+            log.error(f"Échec export audit log : {e}")
+            await query.message.reply_text("⚠️ Échec de l'export — rien n'a été supprimé par sécurité.")
+
+    elif act == "export_litiges_resolus":
+        if uid != SUPER_ADMIN_ID: return
+        resolus = list(db.litiges.find({"statut": "resolu"}))
+        if not resolus:
+            await query.message.reply_text("✅ Aucun litige résolu à archiver.")
+            return
+        buffer = io.BytesIO()
+        buffer.write(f"LITIGES RÉSOLUS ARCHIVÉS — {fmt_date()}\n{'='*40}\n\n".encode())
+        ids_a_supprimer = []
+        for l in resolus:
+            buffer.write(
+                f"#{l['_id']} | Demandeur: {l.get('demandeur_id')} | Faveur: {l.get('faveur','?')} | "
+                f"Sanction: {l.get('sanction', False)} | Résolu par: {l.get('resolu_par','?')}\n"
+                f"Description : {l.get('description','')}\n\n".encode())
+            ids_a_supprimer.append(l["_id"])
+        buffer.seek(0)
+        try:
+            await ctx.bot.send_document(uid, document=InputFile(buffer, filename=f"litiges_resolus_{fmt_date()}.txt"),
+                                        caption=f"⚖️ {len(resolus)} litiges archivés. Suppression en cours...")
+            db.litiges.delete_many({"_id": {"$in": ids_a_supprimer}})
+            await query.message.reply_text(f"✅ {len(ids_a_supprimer)} litiges supprimés de MongoDB, espace libéré !")
+        except Exception as e:
+            log.error(f"Échec export litiges : {e}")
+            await query.message.reply_text("⚠️ Échec de l'export — rien n'a été supprimé par sécurité.")
+
     elif act == "export_pdf":
         buffer = io.BytesIO()
         nb_vendu = db.annonces.count_documents({"statut": "vendu"})
@@ -1272,6 +1354,28 @@ async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 async def job_resume_hebdo(ctx: ContextTypes.DEFAULT_TYPE):
     await ton.resume_hebdo_litiges(ctx.bot, TEAM_CHANNEL_ID)
 
+async def job_nettoyage_auto(ctx: ContextTypes.DEFAULT_TYPE):
+    """Filet de sécurité : supprime les vieilles données jamais exportées manuellement (60 jours+)."""
+    seuil = time.time() - (60 * 86400)
+
+    r1 = db.audit_logs.delete_many({"timestamp": {"$lt": seuil}})
+    r2 = db.litiges.delete_many({"statut": "resolu", "date_cloture": {"$lt": seuil}})
+    r3 = db.escrows.delete_many({"statut": {"$in": ["rembourse", "libere", "expire", "annule"]},
+                                  "date_creation": {"$lt": fmt_date(datetime.datetime.fromtimestamp(seuil))}})
+
+    total = r1.deleted_count + r2.deleted_count
+    if total > 0:
+        try:
+            await ctx.bot.send_message(SUPER_ADMIN_ID,
+                f"🧹 <b>Nettoyage automatique effectué</b>\n\n"
+                f"📜 {r1.deleted_count} logs supprimés (60j+)\n"
+                f"⚖️ {r2.deleted_count} litiges archivés supprimés (60j+)\n\n"
+                f"💡 Pense à exporter manuellement avant 60 jours\n"
+                f"si tu veux garder une trace !",
+                parse_mode="HTML")
+        except Exception: pass
+    log.info(f"🧹 Nettoyage auto : {total} documents supprimés.")
+
 # ══════════════════════════════════════════════════════════════
 #  POST INIT
 # ══════════════════════════════════════════════════════════════
@@ -1314,8 +1418,10 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2))
     app.add_error_handler(global_error_handler)
 
-    if app.job_queue and TEAM_CHANNEL_ID:
-        app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
+    if app.job_queue:
+        if TEAM_CHANNEL_ID:
+            app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
+        app.job_queue.run_repeating(job_nettoyage_auto, interval=86400, first=120)
 
     log.info("🚀 Lancement du polling Telegram...")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
