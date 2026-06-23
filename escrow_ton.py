@@ -77,6 +77,34 @@ def generer_memo(escrow_id) -> str:
     h = hashlib.md5(str(escrow_id).encode()).hexdigest()[:6].upper()
     return f"TX-{h}"
 
+# ══════════════════════════════════════════════════════════════
+#  TICKETS DE PARRAINAGE — SANS COMMISSION
+# ══════════════════════════════════════════════════════════════
+
+def _ticket_non_expire(t: dict) -> bool:
+    try:
+        exp = datetime.datetime.strptime(t["date_expiration"], "%d/%m/%Y %H:%M")
+        return datetime.datetime.now() <= exp
+    except Exception:
+        return False
+
+def get_tickets_valides(user_doc: dict) -> list:
+    return [t for t in user_doc.get("tickets_parrainage", [])
+            if not t.get("utilise") and _ticket_non_expire(t)]
+
+def consommer_ticket(user_id: int) -> bool:
+    user = db.users.find_one({"_id": user_id})
+    if not user:
+        return False
+    tickets = user.get("tickets_parrainage", [])
+    for t in tickets:
+        if not t.get("utilise") and _ticket_non_expire(t):
+            t["utilise"] = True
+            t["date_utilisation"] = fmt_date()
+            db.users.update_one({"_id": user_id}, {"$set": {"tickets_parrainage": tickets}})
+            return True
+    return False
+
 def log_audit(action: str, details: str, acted_by: int):
     db.audit_logs.insert_one({
         "action": action, "details": details, "acted_by": acted_by,
@@ -180,7 +208,7 @@ def save_escrow_update(escrow_id, data: dict):
 #  INITIATION DE L'ESCROW (depuis le choix Direct/Escrow)
 # ══════════════════════════════════════════════════════════════
 
-async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str):
+async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str, commission_override=None):
     montant_str = ann.get("prix", "0")
     try:
         montant_num = float(''.join(c for c in montant_str if c.isdigit() or c == '.'))
@@ -201,6 +229,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
     now = datetime.datetime.now()
     deadline = now + datetime.timedelta(minutes=TIMEOUT_PAIEMENT_MIN)
     cfg = get_escrow_config()
+    commission_finale = commission_override if commission_override is not None else cfg.get("commission_pct", 5)
 
     escrow_doc = {
         "ann_id": ann["_id"],
@@ -211,7 +240,8 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         "devise_origine": devise_texte,
         "montant_ton": ton_amount,
         "fallback_utilise": fallback,
-        "commission_pct": cfg.get("commission_pct", 5),
+        "commission_pct": commission_finale,
+        "ticket_acheteur_applique": commission_override == 0,
         "statut": "attente_paiement",
         "date_creation": fmt_date(now),
         "deadline_paiement": deadline.isoformat(),
@@ -414,6 +444,28 @@ async def confirmer_reception(bot, escrow_id, acheteur_id):
     if not esc or esc["acheteur_id"] != acheteur_id: return
     if esc["statut"] not in ("fonds_bloques", "acces_envoyes"): return
     save_escrow_update(escrow_id, {"statut": "confirme", "date_confirmation": fmt_date()})
+
+    # Si commission déjà à 0 (ticket acheteur appliqué), pas besoin de demander au vendeur
+    if esc.get("commission_pct", 0) == 0:
+        await liberer_fonds(bot, escrow_id, esc)
+        return
+
+    vendeur = db.users.find_one({"_id": esc["vendeur_id"]}) or {}
+    if get_tickets_valides(vendeur):
+        from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
+        kb = IKM([[
+            IKB("🎫 Oui, utiliser mon ticket", callback_data=f"tonact:appliquer_ticket:{escrow_id}"),
+            IKB("❌ Non merci", callback_data=f"tonact:liberer_normal:{escrow_id}")
+        ]])
+        save_escrow_update(escrow_id, {"statut": "attente_choix_ticket"})
+        try:
+            await bot.send_message(esc["vendeur_id"],
+                f"🎫 Tu as un ticket <b>Transaction Sans Commission</b> valide !\n"
+                f"L'utiliser sur cette vente de {esc['montant_ton']} TON (tu garderais 100% au lieu de {100-esc.get('commission_pct',5)}%) ?",
+                parse_mode="HTML", reply_markup=kb)
+        except Exception: pass
+        return
+
     await liberer_fonds(bot, escrow_id, esc)
 
 async def liberer_fonds(bot, escrow_id, esc: dict):
@@ -711,6 +763,21 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
     if act == "confirmer":
         await confirmer_reception(bot, parts[2], uid)
         await query.message.reply_text("✅ Réception confirmée, libération en cours...")
+
+    elif act == "appliquer_ticket":
+        esc = get_escrow(parts[2])
+        if esc:
+            consommer_ticket(uid)
+            save_escrow_update(parts[2], {"commission_pct": 0, "statut": "confirme"})
+            await liberer_fonds(bot, parts[2], get_escrow(parts[2]))
+            await query.message.reply_text("🎫 Ticket utilisé ! Commission à 0% appliquée sur cette vente.")
+
+    elif act == "liberer_normal":
+        esc = get_escrow(parts[2])
+        if esc:
+            save_escrow_update(parts[2], {"statut": "confirme"})
+            await liberer_fonds(bot, parts[2], get_escrow(parts[2]))
+            await query.message.reply_text("✅ Libération en cours (commission normale).")
 
     elif act == "acces_envoyes":
         await acces_envoyes(bot, parts[2], uid)
