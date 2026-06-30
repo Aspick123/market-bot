@@ -29,6 +29,8 @@ Correctifs de sécurité v4.1 (audit 13 points) :
 11. Log consommation ticket
 12. Code mort supprimé
 13. FakeUpdate supprimé
+
+v4.2 : Vérifications obligatoires (abonnement canal + acceptation CGU)
 """
 
 import os
@@ -47,6 +49,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
+from telegram.error import TelegramError
 
 import escrow_ton as ton
 
@@ -92,6 +95,7 @@ DEFAULTS_USER = {
     "banni_jusqua": 0, "tmp_litige_desc": "", "wallet_ton": "",
     "tickets": [],               # liste de {id, expiration, utilisé}
     "filleuls_qualifies": 0,     # compteur de filleuls avec annonce approuvée
+    "cgu_acceptees": False,      # ⬅️ Nouveau champ
 }
 
 DEFAULTS_CONFIG = {
@@ -194,6 +198,62 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 log.error(f"safe_edit a échoué : {e2}")
 
 # ══════════════════════════════════════════════════════════════
+#  VÉRIFICATIONS OBLIGATOIRES (ABONNEMENT + CGU)
+# ══════════════════════════════════════════════════════════════
+
+async def est_abonne_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """Vérifie si l'utilisateur est membre du canal public (ou admin/créateur)."""
+    try:
+        membre = await ctx.bot.get_chat_member(chat_id=PUBLIC_CHANNEL_ID, user_id=user_id)
+        return membre.status in ["member", "administrator", "creator"]
+    except TelegramError as e:
+        log.warning(f"Erreur vérification abonnement canal {PUBLIC_CHANNEL_ID} pour {user_id} : {e}")
+        return False
+
+async def verifier_etapes_obligatoires(update: Update, ctx: ContextTypes.DEFAULT_TYPE, uid: int, u: dict) -> bool:
+    """
+    Renvoie True si l'utilisateur a passé toutes les étapes obligatoires (abonnement + CGU).
+    Sinon, envoie le message approprié et renvoie False.
+    Le superadmin est exempté.
+    """
+    if uid == SUPER_ADMIN_ID:
+        return True
+
+    # 1. Vérification de l'abonnement au canal
+    if not await est_abonne_canal(ctx, uid):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ J'ai rejoint, vérifier", callback_data="nav:verifier_abonnement")]])
+        message = update.effective_message
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                "🔒 Pour utiliser le bot, tu dois d'abord t'abonner à notre canal :\n👉 "
+                + PUBLIC_CHANNEL_ID + "\n\nClique sur le bouton ci-dessous après avoir rejoint.",
+                reply_markup=kb)
+        else:
+            await update.effective_message.reply_text(
+                "🔒 Pour utiliser le bot, tu dois d'abord t'abonner à notre canal :\n👉 "
+                + PUBLIC_CHANNEL_ID + "\n\nClique sur le bouton ci-dessous après avoir rejoint.",
+                reply_markup=kb)
+        return False
+
+    # 2. Acceptation des CGU
+    if not u.get("cgu_acceptees", False):
+        cfg = get_config()
+        cgu_texte = cfg.get("cgu_text", "CGU non disponibles.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]])
+        message = update.effective_message
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{cgu_texte}\n\nEn appuyant sur le bouton, tu acceptes ces conditions.",
+                parse_mode="HTML", reply_markup=kb)
+        else:
+            await update.effective_message.reply_text(
+                f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{cgu_texte}\n\nEn appuyant sur le bouton, tu acceptes ces conditions.",
+                parse_mode="HTML", reply_markup=kb)
+        return False
+
+    return True
+
+# ══════════════════════════════════════════════════════════════
 #  MENU PRINCIPAL
 # ══════════════════════════════════════════════════════════════
 
@@ -258,6 +318,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uname = update.effective_user.username or f"User_{uid}"
     cfg = get_config()
 
+    # ═══════════ Vérifications d'accès (ban/urgence) ═══════════
     if is_blacklisted(uid) and uid != SUPER_ADMIN_ID:
         target = update.callback_query.message if update.callback_query else update.message
         await target.reply_text("🚫 Tu es banni du Marketplace.")
@@ -277,7 +338,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
-    # Traitement des arguments de parrainage / achat
+    # ═══════════ Vérifications abonnement + CGU ═══════════
+    if uid != SUPER_ADMIN_ID:
+        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+            return
+
+    # ═══════════ Traitement des arguments (parrainage / achat) ═══════════
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -406,10 +472,16 @@ def get_gerants_et_plus() -> list:
 
 async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    u = get_user(uid)
+
+    # Vérification étapes obligatoires (sauf pour le superadmin)
+    if uid != SUPER_ADMIN_ID:
+        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+            return
+
     if await ton.handle_ton_input(update, ctx, ctx.bot, SUPER_ADMIN_ID):
         return
 
-    u = get_user(uid)
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
     photo = update.message.photo[-1].file_id if (update.message and update.message.photo) else None
@@ -560,12 +632,19 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     data = query.data
     await query.answer()
     uid = update.effective_user.id
+    u = get_user(uid)
 
+    # Rate limiting
     if not check_callback_rate(uid):
         log.warning(f"Rate limit callback atteint pour {uid}")
         return
 
-    u = get_user(uid)
+    # ═══════════ Vérification étapes obligatoires (sauf pour callbacks spécifiques) ═══════════
+    if uid != SUPER_ADMIN_ID:
+        # Permettre les callbacks liés à l'abonnement et aux CGU même sans être vérifié
+        if data not in ("nav:verifier_abonnement", "nav:accepter_cgu"):
+            if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+                return
 
     try:
         if data.startswith("tonact:"):
@@ -612,6 +691,32 @@ async def handle_nav(query, ctx, uid, u, parts):
     cible = parts[1]
     cfg = get_config()
 
+    # ═══════════ Callbacks spéciaux pour les vérifications ═══════════
+    if cible == "verifier_abonnement":
+        if uid != SUPER_ADMIN_ID and await est_abonne_canal(ctx, uid):
+            # Vérifier si CGU acceptées, sinon les proposer
+            if not u.get("cgu_acceptees", False):
+                cgu_texte = cfg.get("cgu_text", "")
+                await query.message.edit_text(
+                    f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{cgu_texte}\n\nEn appuyant sur le bouton, tu acceptes ces conditions.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]]))
+                return
+            else:
+                await afficher_menu_principal(None, ctx, uid, u, message=query.message)
+                return
+        else:
+            await query.answer("Tu n'es pas encore abonné au canal !", show_alert=True)
+            return
+
+    if cible == "accepter_cgu":
+        if uid != SUPER_ADMIN_ID:
+            save_user(uid, {"cgu_acceptees": True})
+            await query.answer("✅ CGU acceptées !", show_alert=True)
+            await afficher_menu_principal(None, ctx, uid, u, message=query.message)
+            return
+
+    # ═══════════ Navigation standard ═══════════
     if cible == "retour":
         await afficher_menu_principal(None, ctx, uid, u, message=query.message)
 
@@ -1335,6 +1440,11 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
     u = get_user(uid)
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
+
+    # Vérification étapes obligatoires (sauf superadmin et si déjà en train de gérer admin states)
+    if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID"):
+        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+            return
 
     if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID") and text:
         if await handle_admin_states(update, ctx, uid, state, text):
