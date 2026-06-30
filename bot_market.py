@@ -8,6 +8,7 @@ v4.7 – Ajouts :
 - Suppression d'annonce par l'équipe (admin)
 - Rappel automatique de validité des annonces (30j / 3j)
 - Arrêt propre du scanner TON (post_shutdown)
+- Troncature automatique des messages trop longs dans safe_edit
 - Corrections précédentes (CGU, aide, achat par lien, etc.)
 """
 
@@ -88,6 +89,8 @@ DEFAULTS_CONFIG = {
         "4. Le bot et son équipe ne sont pas responsables hors du cadre prévu.\n"
         "5. Tout litige doit être signalé via le Centre des Litiges."
     ),
+    "delai_rappel_annonce_jours": 30,
+    "delai_inactivite_annonce_jours": 3,
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -158,13 +161,21 @@ def log_audit(action, details, acted_by):
 def is_blacklisted(uid):
     return db.blacklist.find_one({"user_id": uid}) is not None
 
+MAX_MESSAGE_LENGTH = 4000  # limite avant troncature
+
+def truncate_text(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> str:
+    if len(text) > max_len:
+        return text[:max_len-2] + "…"
+    return text
+
 async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
     try:
         await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         if "not modified" not in str(e).lower():
             try:
-                await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                truncated = truncate_text(text)
+                await query.message.reply_text(truncated, reply_markup=reply_markup, parse_mode=parse_mode)
             except Exception as e2:
                 log.error(f"safe_edit a échoué : {e2}")
 
@@ -1336,7 +1347,6 @@ async def handle_admin_action(query, ctx, uid, parts):
         return
 
     if act == "supprimer_annonce":
-        # Suppression par l'admin
         ann_id = parts[2]
         oid = try_objectid(ann_id)
         if not oid:
@@ -1346,7 +1356,6 @@ async def handle_admin_action(query, ctx, uid, parts):
         if not annonce:
             await query.answer("Annonce introuvable.")
             return
-        # Supprimer le message du canal si présent
         chat_id = annonce.get("canal_chat_id")
         msg_id = annonce.get("canal_message_id")
         if chat_id and msg_id:
@@ -1520,7 +1529,6 @@ async def handle_admin_action(query, ctx, uid, parts):
 # ══════════════════════════════════════════════════════════════
 
 async def handle_rappel_annonce(query, uid, parts):
-    """Callback quand le vendeur clique sur 'Toujours valable'."""
     annonce_id = parts[2]
     oid = try_objectid(annonce_id)
     if not oid:
@@ -1530,19 +1538,16 @@ async def handle_rappel_annonce(query, uid, parts):
     if not annonce or annonce["vendeur_id"] != uid:
         await query.answer("Ce n'est pas votre annonce.")
         return
-    # Mettre à jour la date de dernier rappel
     db.annonces.update_one({"_id": oid}, {"$set": {"dernier_rappel": time.time()}})
     await query.answer("✅ Merci d'avoir confirmé ! Votre annonce reste active.")
     await query.message.edit_text("✅ Votre annonce a bien été confirmée comme toujours d'actualité.")
 
 async def job_rappel_annonces(ctx: ContextTypes.DEFAULT_TYPE):
-    """Tâche planifiée : vérifie les annonces à rappeler ou à désactiver."""
     maintenant = time.time()
     cfg = get_config()
     delai_rappel = cfg.get("delai_rappel_annonce_jours", 30) * 86400
     delai_inactivite = cfg.get("delai_inactivite_annonce_jours", 3) * 86400
 
-    # 1. Envoyer un rappel aux annonces approuvées dont le dernier rappel est plus vieux que delai_rappel
     seuil_rappel = maintenant - delai_rappel
     annonces_a_rappeler = db.annonces.find({
         "statut": "approuve",
@@ -1552,7 +1557,6 @@ async def job_rappel_annonces(ctx: ContextTypes.DEFAULT_TYPE):
         ]
     })
     for ann in annonces_a_rappeler:
-        # Vérifier si un rappel a déjà été envoyé récemment
         dernier_rappel = ann.get("dernier_rappel", 0)
         if dernier_rappel and (maintenant - dernier_rappel) < delai_rappel:
             continue
@@ -1566,24 +1570,20 @@ async def job_rappel_annonces(ctx: ContextTypes.DEFAULT_TYPE):
                 f"<b>{ann.get('categorie','')}</b> — {ann.get('prix','')} {ann.get('devise','')}\n\n"
                 f"Si oui, cliquez sur le bouton ci-dessous. Sans réponse d'ici {delai_inactivite//86400} jours, l'annonce sera désactivée.",
                 parse_mode="HTML", reply_markup=kb)
-            # Marquer le rappel pour éviter de renvoyer tout de suite
             db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"dernier_rappel": maintenant}})
         except Exception as e:
             log.warning(f"Échec d'envoi du rappel pour l'annonce {ann['_id']}: {e}")
 
-    # 2. Désactiver les annonces qui n'ont pas répondu après le délai d'inactivité
     seuil_desactivation = maintenant - delai_inactivite
     annonces_a_desactiver = db.annonces.find({
         "statut": "approuve",
         "dernier_rappel": {"$lt": seuil_desactivation}
     })
     for ann in annonces_a_desactiver:
-        # Vérifier que le rappel a bien été envoyé (dernier_rappel existe et est assez ancien)
         dernier_rappel = ann.get("dernier_rappel", 0)
         if not dernier_rappel or (maintenant - dernier_rappel) < delai_inactivite:
             continue
         db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"statut": "expire"}})
-        # Supprimer le message du canal
         chat_id = ann.get("canal_chat_id")
         msg_id = ann.get("canal_message_id")
         if chat_id and msg_id:
@@ -1798,7 +1798,6 @@ def main():
         if TEAM_CHANNEL_ID:
             app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
         app.job_queue.run_repeating(job_notif_tickets, interval=86400, first=3600)
-        # Vérification des annonces à rappeler toutes les heures
         app.job_queue.run_repeating(job_rappel_annonces, interval=3600, first=600)
 
     log.info("🚀 Lancement du polling Telegram...")
