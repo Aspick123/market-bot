@@ -9,7 +9,8 @@ v4.7 – Ajouts :
 - Rappel automatique de validité des annonces (30j / 3j)
 - Arrêt propre du scanner TON (post_shutdown)
 - Troncature automatique des messages trop longs dans safe_edit
-- Corrections précédentes (CGU, aide, achat par lien, etc.)
+- Amélioration de la gestion d'erreur globale (trace complète envoyée)
+- Protection renforcée pour l'achat de sa propre annonce
 """
 
 import os
@@ -161,7 +162,7 @@ def log_audit(action, details, acted_by):
 def is_blacklisted(uid):
     return db.blacklist.find_one({"user_id": uid}) is not None
 
-MAX_MESSAGE_LENGTH = 4000  # limite avant troncature
+MAX_MESSAGE_LENGTH = 4000
 
 def truncate_text(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> str:
     if len(text) > max_len:
@@ -233,19 +234,25 @@ async def traiter_achat_en_attente(ctx, update, uid):
     annonce_id = doc["annonce_id"]
     db.achat_attente.delete_one({"user_id": uid})
     try:
-        message = update.effective_message if update else None
+        # Récupération robuste du message
+        message = None
+        if isinstance(update, Update) and update.effective_message:
+            message = update.effective_message
+        elif hasattr(update, 'message') and update.message:
+            message = update.message
         if not message:
             log.error("Pas de message pour déclencher l'achat en attente")
             return False
         await proposer_choix_achat(message, ctx, annonce_id, uid)
         return True
     except Exception as e:
-        log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
+        log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}\n{traceback.format_exc()}")
         try:
-            await update.effective_message.reply_text(
-                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-            )
+            if message:
+                await message.reply_text(
+                    "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+                )
         except Exception:
             pass
         return True
@@ -1079,29 +1086,39 @@ async def handle_view_annonce(query, ctx, parts):
     except Exception as e:
         log.error(f"Échec affichage : {e}")
 
-# ──────────────── CHOIX ACHAT (inchangé) ────────────────
+# ──────────────── CHOIX ACHAT (protection renforcée) ────────────────
 
 async def proposer_choix_achat(message, ctx, id_ann, uid):
-    oid = try_objectid(id_ann)
-    if not oid:
-        await message.reply_text("❌ Lien invalide."); return
-    ann = db.annonces.find_one({"_id": oid})
-    if not ann or ann.get("statut") != "approuve":
-        await message.reply_text("❌ Annonce indisponible."); return
-    if ann.get("vendeur_id") == uid:
-        await message.reply_text("⚠️ Tu ne peux pas acheter ta propre annonce."); return
+    try:
+        oid = try_objectid(id_ann)
+        if not oid:
+            await message.reply_text("❌ Lien invalide.")
+            return
+        ann = db.annonces.find_one({"_id": oid})
+        if not ann:
+            await message.reply_text("❌ Annonce introuvable.")
+            return
+        if ann.get("statut") != "approuve":
+            await message.reply_text("❌ Cette annonce n'est plus disponible.")
+            return
+        if ann.get("vendeur_id") == uid:
+            await message.reply_text("⚠️ Tu ne peux pas acheter ta propre annonce.")
+            return
 
-    kb = [[
-        InlineKeyboardButton("🤝 Direct (sans frais)", callback_data=f"achatchoice:direct:{oid}"),
-        InlineKeyboardButton("🔒 Escrow sécurisé", callback_data=f"achatchoice:escrow:{oid}")
-    ]]
-    await message.reply_text(
-        f"🛒 <b>{safe_html(ann.get('categorie'))}</b>\n💰 {safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}\n\n"
-        f"Comment veux-tu procéder ?\n\n"
-        f"🤝 <b>Direct</b> : tu négocies seul avec le vendeur, aucune protection.\n"
-        f"🔒 <b>Escrow</b> : le bot bloque les fonds jusqu'à confirmation, plus sûr (petite commission).",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
-    )
+        kb = [[
+            InlineKeyboardButton("🤝 Direct (sans frais)", callback_data=f"achatchoice:direct:{oid}"),
+            InlineKeyboardButton("🔒 Escrow sécurisé", callback_data=f"achatchoice:escrow:{oid}")
+        ]]
+        await message.reply_text(
+            f"🛒 <b>{safe_html(ann.get('categorie'))}</b>\n💰 {safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}\n\n"
+            f"Comment veux-tu procéder ?\n\n"
+            f"🤝 <b>Direct</b> : tu négocies seul avec le vendeur, aucune protection.\n"
+            f"🔒 <b>Escrow</b> : le bot bloque les fonds jusqu'à confirmation, plus sûr (petite commission).",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
+        )
+    except Exception as e:
+        log.error(f"Erreur dans proposer_choix_achat: {e}\n{traceback.format_exc()}")
+        await message.reply_text("⚠️ Une erreur est survenue lors de l'affichage de l'annonce.")
 
 async def handle_achat_choice(query, ctx, uid, parts):
     mode, id_ann = parts[1], parts[2]
@@ -1707,20 +1724,23 @@ async def handle_admin_states(update, ctx, uid, state, text):
     return False
 
 # ══════════════════════════════════════════════════════════════
-#  GESTIONNAIRE D'ERREURS GLOBAL (anti-fuite)
+#  GESTIONNAIRE D'ERREURS GLOBAL AMÉLIORÉ
 # ══════════════════════════════════════════════════════════════
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    log.error("Exception non gérée :", exc_info=ctx.error)
-    safe_error = str(ctx.error)
+    tb_str = traceback.format_exc()
+    log.error(f"Exception non gérée :\n{tb_str}")
+    safe_error = str(ctx.error) if ctx.error else "Erreur inconnue"
     for sensitive in [os.environ.get("TON_PRIVATE_KEY", ""), os.environ.get("MONGO_URI", ""),
                       os.environ.get("TONCENTER_API_KEY", ""), BOT_TOKEN]:
         if sensitive:
             safe_error = safe_error.replace(sensitive, "[REDACTED]")
+    # Envoi par petits morceaux pour éviter la limite de 4096 caractères
     try:
-        await ctx.bot.send_message(SUPER_ADMIN_ID, f"🐛 <b>Erreur bot</b> :\n<code>{safe_html(safe_error)[:500]}</code>", parse_mode="HTML")
+        for i in range(0, len(safe_error), 4000):
+            await ctx.bot.send_message(SUPER_ADMIN_ID, f"🐛 <b>Erreur bot</b> :\n<code>{safe_html(safe_error[i:i+4000])}</code>", parse_mode="HTML")
     except Exception as e:
-        log.warning(f"Notification erreur superadmin: {e}")
+        log.warning(f"Notification erreur superadmin impossible: {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  TÂCHES PLANIFIÉES
