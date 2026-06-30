@@ -212,10 +212,17 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
 
 async def rediriger_apres_verifications(ctx, message, uid):
     achat_id = ctx.user_data.pop("achat_attente", None)
-    if achat_id:
+    if not achat_id:
+        return False
+    try:
         await proposer_choix_achat(message, ctx, achat_id, uid)
-        return True
-    return False
+    except Exception as e:
+        log.error(f"Erreur dans proposer_choix_achat pour annonce {achat_id}: {e}")
+        await message.reply_text(
+            "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+        )
+    return True
 
 # ══════════════════════════════════════════════════════════════
 #  MENU PRINCIPAL
