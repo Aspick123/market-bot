@@ -4,10 +4,11 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.5 – Toutes les améliorations intégrées :
-- /help, rappel tickets, feedback après transaction, album photo,
-  scanner TON configurable, anti-fuite, confirmation dépôt, lien contact direct
-- Photo obligatoire pour la création d'annonce
+v4.6 – Corrections critiques + améliorations
+- Achat par lien profond totalement réparé (stockage base, reprise automatique)
+- Bouton Aide dans le menu (liste des commandes)
+- Bouton CGU/CGV corrigé : affichage + acceptation intégrée
+- Toutes les fonctionnalités antérieures conservées
 """
 
 import os
@@ -168,7 +169,7 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 log.error(f"safe_edit a échoué : {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  VÉRIFICATIONS OBLIGATOIRES
+#  VÉRIFICATIONS OBLIGATOIRES (ABONNEMENT + CGU)
 # ══════════════════════════════════════════════════════════════
 
 async def est_abonne_canal(ctx, user_id):
@@ -210,22 +211,37 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
         return False
     return True
 
-async def rediriger_apres_verifications(ctx, message, uid):
-    achat_id = ctx.user_data.pop("achat_attente", None)
-    if not achat_id:
+# ══════════════════════════════════════════════════════════════
+#  GESTION DE L'ACHAT EN ATTENTE (stockage base)
+# ══════════════════════════════════════════════════════════════
+
+async def traiter_achat_en_attente(ctx, update, uid):
+    """Vérifie si un achat est en attente pour cet utilisateur et le déclenche."""
+    doc = db.achat_attente.find_one({"user_id": uid})
+    if not doc:
         return False
+    annonce_id = doc["annonce_id"]
+    db.achat_attente.delete_one({"user_id": uid})  # Nettoyage immédiat
     try:
-        await proposer_choix_achat(message, ctx, achat_id, uid)
+        message = update.effective_message if update else None
+        if not message:
+            log.error("Pas de message pour déclencher l'achat en attente")
+            return False
+        await proposer_choix_achat(message, ctx, annonce_id, uid)
+        return True
     except Exception as e:
-        log.error(f"Erreur dans proposer_choix_achat pour annonce {achat_id}: {e}")
-        await message.reply_text(
-            "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-        )
-    return True
+        log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+            )
+        except Exception:
+            pass
+        return True  # On considère l'achat comme traité (même en erreur) pour ne pas bloquer
 
 # ══════════════════════════════════════════════════════════════
-#  MENU PRINCIPAL
+#  MENU PRINCIPAL (avec bouton Aide)
 # ══════════════════════════════════════════════════════════════
 
 def build_main_menu(uid, u, cfg):
@@ -241,6 +257,7 @@ def build_main_menu(uid, u, cfg):
          InlineKeyboardButton("🔔 Alertes Jeux", callback_data="nav:mes_alertes")],
         [InlineKeyboardButton("⚖️ Centre des Litiges", callback_data="nav:mes_litiges")],
         [InlineKeyboardButton("🚫 Blacklist publique", callback_data="nav:blacklist_pub")],
+        [InlineKeyboardButton("❓ Aide", callback_data="nav:help")],  # Nouveau
     ]
     if cfg.get("recrutement_ouvert") and get_role(uid, u) == "membre":
         kb.append([InlineKeyboardButton("🎯 Devenir Gérant", callback_data="nav:devenir_gerant")])
@@ -281,7 +298,7 @@ async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
         await query.message.reply_text("Tu as déjà un brouillon en cours. Continue ou annule.")
 
 # ══════════════════════════════════════════════════════════════
-#  COMMANDES /start, /help
+#  COMMANDE /start (avec sauvegarde achat en base)
 # ══════════════════════════════════════════════════════════════
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +325,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
-    achat_attente = None
+    # Traitement des arguments (parrainage / achat)
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -324,37 +341,50 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"Erreur traitement ref_: {e}")
         elif arg.startswith("acheter_"):
-            achat_attente = arg.split("_", 1)[1]
+            annonce_id = arg.split("_", 1)[1]
+            # Stockage en base pour persistance même après redémarrage
+            db.achat_attente.update_one(
+                {"user_id": uid},
+                {"$set": {"annonce_id": annonce_id, "date": time.time()}},
+                upsert=True
+            )
 
-    if achat_attente:
-        ctx.user_data["achat_attente"] = achat_attente
-
+    # Vérifications obligatoires
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
-        if await rediriger_apres_verifications(ctx, update.effective_message, uid):
+        if await traiter_achat_en_attente(ctx, update, uid):
             return
 
     await afficher_menu_principal(update, ctx, uid, u)
 
+# ══════════════════════════════════════════════════════════════
+#  COMMANDE /help
+# ══════════════════════════════════════════════════════════════
+
+HELP_TEXT = (
+    "📖 <b>GUIDE DU BOT MARKET ULTRA</b>\n"
+    "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+    "🛍️ <b>Marketplace de comptes/jeux</b> : publie tes comptes, recherche ou achète via un système sécurisé.\n\n"
+    "🔹 <b>Vendre</b> : dépose une annonce (7 étapes), elle sera validée par un modérateur puis publiée sur le canal.\n"
+    "🔹 <b>Acheter</b> : depuis le canal ou la liste, choisis un compte et sélectionne :\n"
+    "   - <b>Direct</b> : négociation libre, aucune protection.\n"
+    "   - <b>Escrow</b> : le bot bloque tes fonds jusqu'à confirmation de réception, puis libère au vendeur (petite commission).\n\n"
+    "🎁 <b>Parrainage</b> : partage ton lien et gagne des tickets 'sans commission' tous les 5 filleuls actifs.\n"
+    "⚖️ <b>Litiges</b> : en cas de problème, signale un litige. L'équipe tranche dans un délai de 7 jours.\n"
+    "📜 <b>CGU</b> : lis et accepte les conditions dans le menu.\n\n"
+    "💡 <i>Commandes :</i>\n"
+    "/start – Menu principal\n"
+    "/help – Cette aide\n"
+    "/alerte [jeu] – Être notifié des nouvelles annonces pour un jeu\n"
+    "/info <ID> – (équipe) Fiche détaillée d'un membre"
+)
+
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "📖 <b>GUIDE DU BOT MARKET ULTRA</b>\n"
-        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-        "🛍️ <b>Marketplace de comptes/jeux</b> : publie tes comptes, recherche ou achète via un système sécurisé.\n\n"
-        "🔹 <b>Vendre</b> : dépose une annonce (7 étapes), elle sera validée par un modérateur puis publiée sur le canal.\n"
-        "🔹 <b>Acheter</b> : depuis le canal ou la liste, choisis un compte et sélectionne :\n"
-        "   - <b>Direct</b> : négociation libre, aucune protection.\n"
-        "   - <b>Escrow</b> : le bot bloque tes fonds jusqu'à confirmation de réception, puis libère au vendeur (petite commission).\n\n"
-        "🎁 <b>Parrainage</b> : partage ton lien et gagne des tickets 'sans commission' tous les 5 filleuls actifs.\n"
-        "⚖️ <b>Litiges</b> : en cas de problème, signale un litige. L'équipe tranche dans un délai de 7 jours.\n"
-        "📜 <b>CGU</b> : lis et accepte les conditions dans le menu.\n\n"
-        "💡 <i>Utilise les commandes : /start, /alerte, /info (équipe), /help</i>"
-    )
-    await update.message.reply_text(txt, parse_mode="HTML")
+    await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
 
 # ══════════════════════════════════════════════════════════════
-#  TUNNEL DE VENTE (photo obligatoire)
+#  TUNNEL DE VENTE (photo obligatoire, album, confirmation)
 # ══════════════════════════════════════════════════════════════
 
 LIMITES = {
@@ -456,7 +486,7 @@ def get_gerants_et_plus():
     return list(set(ids))
 
 # ══════════════════════════════════════════════════════════════
-#  ROUTEUR MESSAGES TEXTE & PHOTOS (gère albums)
+#  ROUTEUR MESSAGES TEXTE & PHOTOS
 # ══════════════════════════════════════════════════════════════
 
 async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -472,12 +502,9 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
 
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
-    # Récupère la photo de plus haute résolution
     photo_id = update.message.photo[-1].file_id if update.message and update.message.photo else None
 
-    # Gestion des albums : si l'utilisateur est en train d'ajouter des photos, on les ajoute une par une
     if state == "VENTE_PHOTOS" and photo_id:
-        # Ajout immédiat de la photo (même si c'est une partie d'un album)
         await executer_tunnel_vente(update, ctx, uid, photo_id=photo_id)
         return
 
@@ -485,8 +512,6 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
         await executer_tunnel_vente(update, ctx, uid, text=text, photo_id=photo_id)
         return
 
-    # ... (suite inchangée pour les autres états : recherche, litige, profil, etc.)
-    # Nous incluons tous les traitements d'états comme dans la version précédente
     if state == "RECHERCHE_INPUT" and text:
         save_user(uid, {"state": "IDLE"})
         escaped_text = re.escape(text)
@@ -635,10 +660,9 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         log.warning(f"Rate limit callback atteint pour {uid}")
         return
 
-    if uid != SUPER_ADMIN_ID:
-        if data not in ("nav:verifier_abonnement", "nav:accepter_cgu"):
-            if not await verifier_etapes_obligatoires(update, ctx, uid, u):
-                return
+    if uid != SUPER_ADMIN_ID and data not in ("nav:verifier_abonnement", "nav:accepter_cgu"):
+        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+            return
 
     try:
         if data.startswith("tonact:"):
@@ -683,7 +707,9 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         except Exception as e2:
             log.warning(f"Impossible de notifier l'erreur callback: {e2}")
 
-# ──────────────── NAVIGATION (inclut vérif photo obligatoire) ────────────────
+# ══════════════════════════════════════════════════════════════
+#  NAVIGATION (avec nouvel aide, cgu corrigé, reprise achat)
+# ══════════════════════════════════════════════════════════════
 
 async def handle_nav(query, ctx, uid, u, parts):
     cible = parts[1]
@@ -699,7 +725,7 @@ async def handle_nav(query, ctx, uid, u, parts):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]]))
                 return
             else:
-                if await rediriger_apres_verifications(ctx, query.message, uid):
+                if await traiter_achat_en_attente(ctx, query, uid):
                     return
                 await afficher_menu_principal(None, ctx, uid, u, message=query.message)
                 return
@@ -711,15 +737,35 @@ async def handle_nav(query, ctx, uid, u, parts):
         if uid != SUPER_ADMIN_ID:
             save_user(uid, {"cgu_acceptees": True})
             await query.answer("✅ CGU acceptées !", show_alert=True)
-            if await rediriger_apres_verifications(ctx, query.message, uid):
+            if await traiter_achat_en_attente(ctx, query, uid):
                 return
             await afficher_menu_principal(None, ctx, uid, u, message=query.message)
             return
 
     if cible == "retour":
+        if await traiter_achat_en_attente(ctx, query, uid):
+            return
         await afficher_menu_principal(None, ctx, uid, u, message=query.message)
+        return
 
-    elif cible == "annuler_vente":
+    if cible == "help":
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]])
+        await query.message.edit_text(HELP_TEXT, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if cible == "cgu":
+        # Afficher les CGU, avec bouton d'acceptation si pas encore acceptées
+        kb_rows = []
+        if not u.get("cgu_acceptees", False):
+            kb_rows.append([InlineKeyboardButton("✅ J'accepte les CGU", callback_data="nav:accepter_cgu")])
+        kb_rows.append([InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")])
+        await query.message.edit_text(
+            f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cfg.get('cgu_text',''))}",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_rows))
+        return
+
+    # --- Les autres cibles (inchangées) ---
+    if cible == "annuler_vente":
         db.annonces.delete_one({"vendeur_id": uid, "statut": "brouillon"})
         save_user(uid, {"state": "IDLE"})
         await safe_edit(query, "❌ Annulé.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
@@ -760,7 +806,6 @@ async def handle_nav(query, ctx, uid, u, parts):
     elif cible == "mon_profil":
         nb_ventes = db.annonces.count_documents({"vendeur_id": uid, "statut": "vendu"})
         wallet = u.get("wallet_ton") or "Non renseigné"
-        # Calcul moyenne des évaluations
         evals = u.get("evaluations", [])
         if evals:
             moyenne = round(sum(e["note"] for e in evals) / len(evals), 1)
@@ -787,8 +832,6 @@ async def handle_nav(query, ctx, uid, u, parts):
         ]
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
-    # ... (autres cibles de nav inchangées : mes_annonces, cgu, leaderboard, parrainage, etc.)
-    # Nous les reprenons telles quelles ci-dessous
     elif cible == "mes_annonces":
         mine = list(db.annonces.find({"vendeur_id": uid, "statut": {"$ne": "brouillon"}}).limit(15))
         if not mine:
@@ -807,10 +850,6 @@ async def handle_nav(query, ctx, uid, u, parts):
                 kb.append([InlineKeyboardButton(f"🗑️ Supprimer {item.get('categorie','?')[:15]}", callback_data=f"viewann:suppr:{item['_id']}")])
         kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
-
-    elif cible == "cgu":
-        txt = f"📜 <b>CGU & CGV</b>\n\n{safe_html(cfg.get('cgu_text',''))}"
-        await safe_edit(query, txt, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
     elif cible == "leaderboard":
         pipeline = [{"$match": {"statut": "vendu"}}, {"$group": {"_id": "$vendeur_id", "total": {"$sum": 1}}}, {"$sort": {"total": -1}}, {"$limit": 5}]
@@ -858,6 +897,8 @@ async def handle_nav(query, ctx, uid, u, parts):
             return
         await afficher_admin_root(query, ctx, uid, u)
 
+# (La suite du code avec toutes les autres fonctions est inchangée. Je les inclus ci-dessous.)
+
 # ──────────────── GESTION PHOTOS (fin_photos vérifie photo obligatoire) ────────────────
 
 async def handle_plat(query, ctx, uid, parts):
@@ -894,7 +935,6 @@ async def handle_moderation(query, ctx, parts):
             f"📱 <code>{safe_html(item.get('plateforme'))}</code>\n💰 <b>{safe_html(item.get('prix'))} {safe_html(item.get('devise'))}</b>\n"
             f"📝 {safe_html(item.get('description',''))}\n\n👤 Vendeur : @{safe_html(v.get('username'))}"
         )
-        # Boutons : Acheter et Contacter le vendeur (lien direct)
         kb_pub = [
             [InlineKeyboardButton("🛒 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")],
             [InlineKeyboardButton("💬 Contacter le vendeur", url=f"tg://user?id={item['vendeur_id']}")]
@@ -916,7 +956,6 @@ async def handle_moderation(query, ctx, parts):
         db.annonces.update_one({"_id": oid}, {"$set": update_fields})
         log_audit("ANNONCE_APPROUVEE", str(oid), query.from_user.id)
 
-        # Parrainage, tickets, etc. (inchangé)
         parrain = v.get("parrain")
         if parrain and parrain != item["vendeur_id"]:
             filleuls_qualifies = db.users.find_one_and_update(
@@ -1556,7 +1595,6 @@ async def handle_admin_states(update, ctx, uid, state, text):
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Exception non gérée :", exc_info=ctx.error)
     safe_error = str(ctx.error)
-    # Masquer les informations sensibles
     for sensitive in [os.environ.get("TON_PRIVATE_KEY", ""), os.environ.get("MONGO_URI", ""),
                       os.environ.get("TONCENTER_API_KEY", ""), BOT_TOKEN]:
         if sensitive:
@@ -1574,10 +1612,8 @@ async def job_resume_hebdo(ctx: ContextTypes.DEFAULT_TYPE):
     await ton.resume_hebdo_litiges(ctx.bot, TEAM_CHANNEL_ID)
 
 async def job_notif_tickets(ctx: ContextTypes.DEFAULT_TYPE):
-    """Rappel 3 jours avant expiration des tickets de parrainage."""
     now = time.time()
-    seuil = now + 3 * 86400  # dans 3 jours
-    # Parcourir tous les utilisateurs qui ont des tickets non utilisés
+    seuil = now + 3 * 86400
     users = db.users.find({"tickets": {"$not": {"$size": 0}}})
     for u in users:
         for ticket in u.get("tickets", []):
@@ -1639,7 +1675,6 @@ def main():
     if app.job_queue:
         if TEAM_CHANNEL_ID:
             app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
-        # Tâche quotidienne de rappel des tickets
         app.job_queue.run_repeating(job_notif_tickets, interval=86400, first=3600)
 
     log.info("🚀 Lancement du polling Telegram...")
