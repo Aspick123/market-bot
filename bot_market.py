@@ -11,6 +11,7 @@ v4.7 – Ajouts :
 - Troncature automatique des messages trop longs dans safe_edit
 - Amélioration de la gestion d'erreur globale (trace complète envoyée)
 - Protection renforcée pour l'achat de sa propre annonce
+- Correction du blocage des nouveaux utilisateurs (CGU trop longues)
 """
 
 import os
@@ -211,6 +212,8 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     if not u.get("cgu_acceptees", False):
         cfg = get_config()
         cgu_texte = cfg.get("cgu_text", "CGU non disponibles.")
+        # Tronquer pour éviter "Message is too long"
+        cgu_texte = truncate_text(cgu_texte, 3800)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]])
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -234,25 +237,19 @@ async def traiter_achat_en_attente(ctx, update, uid):
     annonce_id = doc["annonce_id"]
     db.achat_attente.delete_one({"user_id": uid})
     try:
-        # Récupération robuste du message
-        message = None
-        if isinstance(update, Update) and update.effective_message:
-            message = update.effective_message
-        elif hasattr(update, 'message') and update.message:
-            message = update.message
+        message = update.effective_message if update else None
         if not message:
             log.error("Pas de message pour déclencher l'achat en attente")
             return False
         await proposer_choix_achat(message, ctx, annonce_id, uid)
         return True
     except Exception as e:
-        log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}\n{traceback.format_exc()}")
+        log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
         try:
-            if message:
-                await message.reply_text(
-                    "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-                )
+            await update.effective_message.reply_text(
+                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+            )
         except Exception:
             pass
         return True
@@ -1735,7 +1732,6 @@ async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
                       os.environ.get("TONCENTER_API_KEY", ""), BOT_TOKEN]:
         if sensitive:
             safe_error = safe_error.replace(sensitive, "[REDACTED]")
-    # Envoi par petits morceaux pour éviter la limite de 4096 caractères
     try:
         for i in range(0, len(safe_error), 4000):
             await ctx.bot.send_message(SUPER_ADMIN_ID, f"🐛 <b>Erreur bot</b> :\n<code>{safe_html(safe_error[i:i+4000])}</code>", parse_mode="HTML")
