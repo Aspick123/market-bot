@@ -31,6 +31,7 @@ Correctifs de sécurité v4.1 (audit 13 points) :
 13. FakeUpdate supprimé
 
 v4.2 : Vérifications obligatoires (abonnement canal + acceptation CGU)
+v4.3 : Commande /info pour l'équipe (détails utilisateur)
 """
 
 import os
@@ -1363,6 +1364,62 @@ async def cmd_alerte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔔 Alerte activée pour : <b>{safe_html(jeu)}</b>", parse_mode="HTML")
 
 # ══════════════════════════════════════════════════════════════
+#  COMMANDE /info — réservée à l'équipe (gérant+)
+# ══════════════════════════════════════════════════════════════
+
+async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    u = get_user(uid)
+    if not has_level(uid, u, "gerant"):
+        await update.message.reply_text("🚫 Réservé à l'équipe (Gérant+).")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Format : /info <ID>")
+        return
+    try:
+        target_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ ID invalide.")
+        return
+
+    target = db.users.find_one({"_id": target_id})
+    if not target:
+        await update.message.reply_text(f"❌ Aucun utilisateur trouvé avec l'ID {target_id}.")
+        return
+
+    role = get_role(target_id, target)
+    blacklist_status = "🚫 OUI" if is_blacklisted(target_id) else "✅ Non"
+    nb_annonces_actives = db.annonces.count_documents({"vendeur_id": target_id, "statut": "approuve"})
+    nb_ventes = db.annonces.count_documents({"vendeur_id": target_id, "statut": "vendu"})
+    derniere_annonces = list(db.annonces.find(
+        {"vendeur_id": target_id, "statut": {"$ne": "brouillon"}}
+    ).sort("date_creation", -1).limit(3))
+
+    txt = (
+        f"👤 <b>FICHE UTILISATEUR</b>\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        f"🆔 <b>ID :</b> <code>{target_id}</code>\n"
+        f"👤 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
+        f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
+        f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
+        f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
+        f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
+        f"🚫 <b>Blacklisté :</b> {blacklist_status}\n"
+        f"📅 <b>Inscription :</b> {fmt_date(target.get('date_inscription', 0))}\n"
+        f"📦 <b>Annonces actives :</b> {nb_annonces_actives}\n"
+        f"🏷️ <b>Ventes validées :</b> {nb_ventes}\n"
+        f"🎁 <b>Filleuls qualifiés :</b> {target.get('filleuls_qualifies', 0)}\n"
+        f"⚡ <b>Points :</b> {target.get('points', 0)}\n"
+    )
+    if derniere_annonces:
+        txt += "\n📌 <b>Dernières annonces :</b>\n"
+        for ann in derniere_annonces:
+            statut_lbl = {"en_attente": "🟡", "approuve": "✅", "rejete": "❌", "vendu": "🏷️"}.get(ann.get("statut"), "❓")
+            txt += f"{statut_lbl} {safe_html(ann.get('categorie','?'))} — {safe_html(ann.get('prix','?'))} {safe_html(ann.get('devise','?'))}\n"
+
+    await update.message.reply_text(txt, parse_mode="HTML")
+
+# ══════════════════════════════════════════════════════════════
 #  HANDLER MESSAGES — états admin spécifiques (blacklist/rôles)
 # ══════════════════════════════════════════════════════════════
 
@@ -1460,6 +1517,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("alerte", cmd_alerte))
+    app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CallbackQueryHandler(central_callback_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2))
     app.add_error_handler(global_error_handler)
