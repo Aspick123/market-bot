@@ -5,11 +5,15 @@
 ║  live, commission auto, double validation, reçus, paie équipe║
 ╚══════════════════════════════════════════════════════════════╝
 
-Variables d'environnement nécessaires :
-  TON_WALLET_ADDRESS   = adresse publique du wallet du bot
-  TON_PRIVATE_KEY       = phrase mnémonique (24 mots, séparés par espace)
-  TONCENTER_API_KEY     = clé API toncenter.com
-  MONGO_URI             = (déjà utilisée par bot_market.py)
+Correctifs de sécurité v4.1 (audit) :
+- Regex wallet TON
+- Verrou atomique libération
+- Timeout litige automatique (DELAI_RESOLUTION_LITIGE_JOURS)
+- Alerte commission échouée
+- Alerte paiement orphelin
+- Ticket parrainage atomique
+- Log consommation ticket
+- log.warning sur exceptions silencieuses
 """
 
 import os
@@ -18,6 +22,8 @@ import time
 import hashlib
 import logging
 import datetime
+import re
+import asyncio
 import aiohttp
 from pymongo import MongoClient
 from bson.objectid import ObjectId
@@ -41,6 +47,12 @@ db = client["bot_market_premium_db"]
 TIMEOUT_PAIEMENT_MIN = 30
 TIMEOUT_CONFIRMATION_MIN = 30
 SCAN_INTERVAL_SEC = 20
+
+# Correctif 7 : Délai de résolution litige (en jours)
+DELAI_RESOLUTION_LITIGE_JOURS = int(os.environ.get("DELAI_RESOLUTION_LITIGE_JOURS", "7"))
+
+# Correctif 5 : Pattern regex pour adresse wallet TON
+WALLET_TON_PATTERN = re.compile(r'^(EQ|UQ)[A-Za-z0-9_-]{46}$')
 
 DEFAULTS_ESCROW_CONFIG = {
     "commission_pct": 5,
@@ -102,7 +114,7 @@ def normaliser_devise(texte: str) -> str:
     for alias, code in ALIASES_DEVISE.items():
         if alias in t:
             return code
-    return "USD"  # par défaut si non reconnu (approximation documentée)
+    return "USD"
 
 async def get_ton_usd_rate() -> float:
     try:
@@ -202,6 +214,16 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
     deadline = now + datetime.timedelta(minutes=TIMEOUT_PAIEMENT_MIN)
     cfg = get_escrow_config()
 
+    # Vérification ticket sans commission
+    u = db.users.find_one({"_id": acheteur_id})
+    ticket_utilise = None
+    if u and u.get("tickets"):
+        now_ts = time.time()
+        for ticket in u["tickets"]:
+            if not ticket.get("utilise", False) and ticket.get("expiration", 0) > now_ts:
+                ticket_utilise = ticket["id"]
+                break
+
     escrow_doc = {
         "ann_id": ann["_id"],
         "vendeur_id": ann["vendeur_id"],
@@ -219,6 +241,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         "tx_hash": None,
         "expediteur_wallet": None,
         "vendeur_wallet": None,
+        "ticket_id": ticket_utilise,      # sera utilisé lors de la libération
     }
     escrow_id = db.escrows.insert_one(escrow_doc).inserted_id
     memo = generer_memo(escrow_id)
@@ -275,13 +298,15 @@ def extraire_memo(tx) -> str:
         if body.get("text"):
             import base64
             return base64.b64decode(body["text"]).decode("utf-8", errors="ignore").strip()
-    except Exception: pass
+    except Exception:
+        pass
     return ""
 
 def extraire_montant(tx) -> float:
     try:
         return round(int(tx.get("in_msg", {}).get("value", 0)) / 1_000_000_000, 4)
-    except Exception: return 0.0
+    except Exception:
+        return 0.0
 
 def extraire_expediteur(tx) -> str:
     return tx.get("in_msg", {}).get("source", "")
@@ -301,6 +326,7 @@ async def matcher_paiements(bot):
         expediteur = extraire_expediteur(tx)
         if not memo or not tx_hash:
             continue
+        matched = False
         for esc in pending:
             if esc.get("memo") != memo or esc.get("tx_hash") == tx_hash:
                 continue
@@ -311,10 +337,28 @@ async def matcher_paiements(bot):
                 deadline = datetime.datetime.fromisoformat(esc["deadline_paiement"])
                 if datetime.datetime.now() > deadline:
                     db.escrows.update_one({"_id": esc["_id"]}, {"$set": {"statut": "expire"}})
+                    # Correctif 9 : alerte paiement orphelin
+                    try:
+                        super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+                        await bot.send_message(super_admin_id,
+                            f"⚠️ Paiement orphelin détecté : memo {memo}, montant {montant} TON, tx {tx_hash[:10]}...")
+                    except Exception as e:
+                        log.warning(f"Impossible d'alerter superadmin (orphelin) : {e}")
                     continue
-            except Exception: pass
+            except Exception as e:
+                log.warning(f"Erreur parsing deadline : {e}")
+                continue
             await confirmer_paiement_recu(bot, esc["_id"], esc, tx_hash, montant, expediteur)
+            matched = True
             break
+        if not matched:
+            # Paiement sans escrow correspondant
+            try:
+                super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+                await bot.send_message(super_admin_id,
+                    f"⚠️ Paiement entrant non reconnu : memo {memo}, {montant} TON depuis {expediteur[:10]}...")
+            except Exception as e:
+                log.warning(f"Alerte paiement inconnu : {e}")
 
 async def confirmer_paiement_recu(bot, escrow_id, esc: dict, tx_hash: str, montant: float, expediteur: str):
     now = datetime.datetime.now()
@@ -334,17 +378,20 @@ async def confirmer_paiement_recu(bot, escrow_id, esc: dict, tx_hash: str, monta
         await bot.send_message(esc["vendeur_id"],
             f"🟢 <b>FONDS SÉCURISÉS !</b>\n\n{montant} TON bloqués en séquestre.\nTransmets les accès à l'acheteur puis confirme :",
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_v))
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Échec notification vendeur fonds bloqués : {e}")
     try:
         await bot.send_message(esc["acheteur_id"],
             f"🟡 <b>PAIEMENT REÇU & SÉCURISÉ</b>\n\n{montant} TON verrouillés. Le vendeur va t'envoyer les accès.\n"
             f"⏳ Confirme dans les {TIMEOUT_CONFIRMATION_MIN} minutes suivant réception.",
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_a))
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Échec notification acheteur fonds bloqués : {e}")
 
 async def acces_envoyes(bot, escrow_id, vendeur_id):
     esc = get_escrow(escrow_id)
-    if not esc or esc["vendeur_id"] != vendeur_id: return
+    if not esc or esc["vendeur_id"] != vendeur_id:
+        return
     save_escrow_update(escrow_id, {"statut": "acces_envoyes"})
     kb_a = [[
         InlineKeyboardButton("✅ Confirmer réception", callback_data=f"tonact:confirmer:{escrow_id}"),
@@ -353,7 +400,8 @@ async def acces_envoyes(bot, escrow_id, vendeur_id):
     try:
         await bot.send_message(esc["acheteur_id"], "📦 <b>Le vendeur a transmis les accès !</b>\nVérifie puis confirme.",
                                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_a))
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Échec notification accès envoyés : {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  TRANSFERT TON RÉEL
@@ -406,39 +454,80 @@ async def get_seqno(address: str) -> int:
 
 async def confirmer_reception(bot, escrow_id, acheteur_id):
     esc = get_escrow(escrow_id)
-    if not esc or esc["acheteur_id"] != acheteur_id: return
-    if esc["statut"] not in ("fonds_bloques", "acces_envoyes"): return
+    if not esc or esc["acheteur_id"] != acheteur_id:
+        return
+    if esc["statut"] not in ("fonds_bloques", "acces_envoyes"):
+        return
     save_escrow_update(escrow_id, {"statut": "confirme", "date_confirmation": fmt_date()})
     await liberer_fonds(bot, escrow_id, esc)
 
 async def liberer_fonds(bot, escrow_id, esc: dict):
+    # Correctif 6 : Verrou atomique anti-double-traitement
+    lock_result = db.escrows.find_one_and_update(
+        {"_id": ObjectId(escrow_id),
+         "statut": {"$in": ["confirme", "attente_wallet_vendeur"]},
+         "liberation_en_cours": {"$ne": True}},
+        {"$set": {"liberation_en_cours": True}}
+    )
+    if not lock_result:
+        log.warning(f"Tentative de double libération ou escrow déjà traité : {escrow_id}")
+        return
+
     cfg = get_escrow_config()
     montant = esc.get("montant_recu", esc["montant_ton"])
     commission_pct = esc.get("commission_pct", cfg.get("commission_pct", 5))
+
+    # Correctif 10+11 : Consommation ticket de parrainage atomique
+    ticket_id = esc.get("ticket_id")
+    if ticket_id:
+        update_res = db.users.find_one_and_update(
+            {"_id": esc["acheteur_id"], "tickets.id": ticket_id, "tickets.utilise": False},
+            {"$set": {"tickets.$.utilise": True}}
+        )
+        if update_res:
+            commission_pct = 0  # Pas de commission
+            log_audit("TICKET_CONSOMME", f"Escrow {escrow_id} ticket {ticket_id}", esc["acheteur_id"])
+        else:
+            log.warning(f"Ticket {ticket_id} déjà utilisé ou expiré pour l'utilisateur {esc['acheteur_id']}")
+
     commission = round(montant * commission_pct / 100, 4)
     montant_vendeur = round(montant - commission, 4)
 
-    from_db_users = db.users.find_one({"_id": esc["vendeur_id"]}) or {}
-    vendeur_wallet = from_db_users.get("wallet_ton")
+    vendeur_data = db.users.find_one({"_id": esc["vendeur_id"]}) or {}
+    vendeur_wallet = vendeur_data.get("wallet_ton")
 
     if not vendeur_wallet:
         try:
             await bot.send_message(esc["vendeur_id"],
                 f"💰 <b>Transaction confirmée !</b>\n\nPour recevoir {montant_vendeur} TON, envoie ton adresse wallet TON :")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Échec demande wallet vendeur : {e}")
         save_escrow_update(escrow_id, {"statut": "attente_wallet_vendeur", "montant_vendeur_calc": montant_vendeur,
-                                       "commission_calc": commission})
+                                       "commission_calc": commission, "liberation_en_cours": False})
         return
 
+    # Envoi au vendeur
     success_v = await envoyer_ton(vendeur_wallet, montant_vendeur, f"Vente ESC{str(escrow_id)[-6:]}")
 
-    admin_wallet = cfg.get("admin_ton_wallet", "")
-    if admin_wallet:
-        await envoyer_ton(admin_wallet, commission, f"Commission ESC{str(escrow_id)[-6:]}")
+    # Envoi commission si applicable
+    commission_ok = True
+    if commission > 0:
+        admin_wallet = cfg.get("admin_ton_wallet", "")
+        if admin_wallet:
+            commission_ok = await envoyer_ton(admin_wallet, commission, f"Commission ESC{str(escrow_id)[-6:]}")
+            if not commission_ok:
+                # Correctif 8 : alerter superadmin si échec commission
+                try:
+                    super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+                    await bot.send_message(super_admin_id,
+                        f"⚠️ Échec de l'envoi de la commission de {commission} TON pour ESC{str(escrow_id)[-6:]} vers {admin_wallet}")
+                except Exception as e:
+                    log.warning(f"Impossible d'alerter superadmin (commission failed) : {e}")
 
     if success_v:
         save_escrow_update(escrow_id, {"statut": "libere", "date_cloture": fmt_date(),
-                                       "montant_vendeur_final": montant_vendeur, "commission_finale": commission})
+                                       "montant_vendeur_final": montant_vendeur, "commission_finale": commission,
+                                       "liberation_en_cours": False})
         db.annonces.update_one({"_id": esc["ann_id"]}, {"$set": {"statut": "vendu"}})
         db.users.update_one({"_id": esc["vendeur_id"]}, {"$inc": {"points": 100}})
 
@@ -449,11 +538,14 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
             await bot.send_message(esc["vendeur_id"],
                 f"🎉 <b>Vente confirmée !</b>\n\n✅ {montant_vendeur} TON envoyés.\n💼 Commission : {commission} TON",
                 parse_mode="HTML")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Notification finale échouée : {e}")
     else:
+        db.escrows.update_one({"_id": ObjectId(escrow_id)}, {"$set": {"liberation_en_cours": False}})
         try:
             await bot.send_message(esc["vendeur_id"], "⚠️ Erreur transfert. Le support a été notifié.")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Notification échec transfert vendeur : {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  LITIGE ESCROW + DOUBLE VALIDATION
@@ -461,7 +553,8 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
 
 async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
     esc = get_escrow(escrow_id)
-    if not esc: return
+    if not esc:
+        return
     save_escrow_update(escrow_id, {"statut": "litige", "date_litige": fmt_date()})
     lit_id = db.litiges.insert_one({
         "escrow_id": escrow_id, "demandeur_id": acheteur_id, "vendeur_id": esc["vendeur_id"],
@@ -478,15 +571,18 @@ async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
             f"🚨 <b>LITIGE ESCROW — {esc['montant_ton']} TON</b>\n\n"
             f"Acheteur : <code>{acheteur_id}</code>\nVendeur : <code>{esc['vendeur_id']}</code>",
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Notification litige superadmin échouée : {e}")
     try:
         await bot.send_message(acheteur_id, "⚖️ Litige ouvert. Les fonds sont bloqués en attente de résolution.")
         await bot.send_message(esc["vendeur_id"], "⚖️ Un litige a été ouvert sur cette vente. Fonds bloqués.")
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Notification litige parties échouée : {e}")
 
 async def rembourser_acheteur(bot, escrow_id, acted_by, super_admin_id):
     esc = get_escrow(escrow_id)
-    if not esc: return False
+    if not esc:
+        return False
     montant = esc.get("montant_recu", esc["montant_ton"])
     seuil = get_escrow_config().get("seuil_double_validation_ton", 5.0)
 
@@ -505,12 +601,14 @@ async def rembourser_acheteur(bot, escrow_id, acted_by, super_admin_id):
         try:
             await bot.send_message(esc["acheteur_id"], f"↩️ Remboursement effectué : {montant} TON.")
             await bot.send_message(esc["vendeur_id"], "ℹ️ La transaction a été annulée et remboursée à l'acheteur.")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Notification remboursement échouée : {e}")
     return success
 
 async def forcer_liberer_fonds(bot, escrow_id, acted_by, super_admin_id):
     esc = get_escrow(escrow_id)
-    if not esc: return False
+    if not esc:
+        return False
     montant = esc.get("montant_recu", esc["montant_ton"])
     seuil = get_escrow_config().get("seuil_double_validation_ton", 5.0)
 
@@ -535,7 +633,8 @@ async def _demander_double_validation(bot, escrow_id, action, demandeur_id, supe
             f"Un gérant/admin (<code>{demandeur_id}</code>) veut <b>{action}</b> les fonds\n"
             f"d'une transaction dépassant le seuil. Ton accord est requis :",
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Notification double validation échouée : {e}")
 
 async def traiter_double_validation(bot, escrow_id, valider: bool, super_admin_id):
     esc = get_escrow(escrow_id)
@@ -551,7 +650,8 @@ async def traiter_double_validation(bot, escrow_id, valider: bool, super_admin_i
         save_escrow_update(escrow_id, {"statut": "litige"})
         try:
             await bot.send_message(esc.get("demandeur_validation"), "❌ Le Superadmin a refusé cette action.")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Notification refus double validation : {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  REÇU DE TRANSACTION (PDF)
@@ -586,7 +686,8 @@ async def generer_recu(bot, escrow_id, esc: dict, montant_total, montant_vendeur
                 buffer.seek(0)
                 await bot.send_document(dest, document=InputFile(io.BytesIO(buffer.read()), filename=buffer.name),
                                         caption="🧾 Reçu de ta transaction.")
-            except Exception: pass
+            except Exception as e:
+                log.warning(f"Envoi reçu PDF échoué pour {dest} : {e}")
     except ImportError:
         log.warning("reportlab non installé — reçu PDF ignoré.")
     except Exception as e:
@@ -628,7 +729,8 @@ async def payer_gerant(bot, gerant_id: int, montant_ton: float, super_admin_id):
         log_audit("PAIEMENT_EQUIPE", f"{gerant_id} — {montant_ton} TON", super_admin_id)
         try:
             await bot.send_message(gerant_id, f"💸 Tu as reçu {montant_ton} TON pour ton travail ce mois !")
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Notification paiement équipe {gerant_id} : {e}")
         return True, "Paiement effectué."
     return False, "Échec de l'envoi TON."
 
@@ -657,10 +759,11 @@ async def resume_hebdo_litiges(bot, team_channel_id):
             f"{faveur_acheteur} en faveur acheteur, {faveur_vendeur} en faveur vendeur\n"
             f"{sanctions} sanction(s) appliquée(s)",
             parse_mode="HTML")
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Envoi résumé hebdo échoué : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  BOUCLE SCANNER
+#  BOUCLE SCANNER & TIMEOUTS
 # ══════════════════════════════════════════════════════════════
 
 async def boucle_scanner(bot):
@@ -671,21 +774,40 @@ async def boucle_scanner(bot):
             await verifier_timeouts(bot)
         except Exception as e:
             log.error(f"Erreur boucle scanner : {e}")
-        import asyncio
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def verifier_timeouts(bot):
     now = datetime.datetime.now()
+    # Timeout confirmation acheteur
     for esc in db.escrows.find({"statut": {"$in": ["fonds_bloques", "acces_envoyes"]}}):
-        if not esc.get("deadline_confirmation"): continue
+        if not esc.get("deadline_confirmation"):
+            continue
         try:
             deadline = datetime.datetime.fromisoformat(esc["deadline_confirmation"])
             if now > deadline:
                 await rembourser_acheteur(bot, esc["_id"], 0, 0)
-        except Exception: pass
+        except Exception as e:
+            log.warning(f"Erreur timeout confirmation : {e}")
+
+    # Correctif 7 : Timeout automatique des litiges
+    for esc in db.escrows.find({"statut": "litige"}):
+        date_litige_str = esc.get("date_litige")
+        if not date_litige_str:
+            continue
+        try:
+            date_litige_dt = datetime.datetime.strptime(date_litige_str, "%d/%m/%Y %H:%M")
+            if (now - date_litige_dt).days >= DELAI_RESOLUTION_LITIGE_JOURS:
+                await rembourser_acheteur(bot, esc["_id"], 0, 0)
+                super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+                try:
+                    await bot.send_message(super_admin_id,
+                        f"⏰ Litige ESC{str(esc['_id'])[-6:]} résolu automatiquement (délai {DELAI_RESOLUTION_LITIGE_JOURS}j).")
+                except Exception as e:
+                    log.warning(f"Notification résolution auto litige échouée : {e}")
+        except Exception as e:
+            log.warning(f"Erreur parsing date litige : {e}")
 
 def demarrer_scanner(bot):
-    import asyncio
     asyncio.create_task(boucle_scanner(bot))
 
 # ══════════════════════════════════════════════════════════════
@@ -717,13 +839,17 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
 
     elif act == "rembourser":
         ok = await rembourser_acheteur(bot, parts[2], uid, super_admin_id)
-        if ok: await query.message.reply_text("↩️ Remboursement effectué.")
-        else: await query.message.reply_text("⏳ Validation superadmin requise (montant élevé) ou erreur.")
+        if ok:
+            await query.message.reply_text("↩️ Remboursement effectué.")
+        else:
+            await query.message.reply_text("⏳ Validation superadmin requise (montant élevé) ou erreur.")
 
     elif act == "forcer_liberer":
         ok = await forcer_liberer_fonds(bot, parts[2], uid, super_admin_id)
-        if ok: await query.message.reply_text("✅ Fonds libérés.")
-        else: await query.message.reply_text("⏳ Validation superadmin requise (montant élevé) ou erreur.")
+        if ok:
+            await query.message.reply_text("✅ Fonds libérés.")
+        else:
+            await query.message.reply_text("⏳ Validation superadmin requise (montant élevé) ou erreur.")
 
     elif act == "valider_double":
         await traiter_double_validation(bot, parts[2], True, super_admin_id)
@@ -737,7 +863,7 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
         gerant_id = int(parts[2])
         s = db.team_stats.find_one({"_id": gerant_id}) or {}
         pts = s.get("points_mois", 0)
-        montant_suggere = round(pts * 0.05, 2)  # 1 point ≈ 0.05 TON, ajustable
+        montant_suggere = round(pts * 0.05, 2)
         ctx.user_data["ton_pay_gerant_id"] = gerant_id
         ctx.user_data["ton_pay_montant_suggere"] = montant_suggere
         await query.message.reply_text(
@@ -772,8 +898,8 @@ async def handle_ton_input(update, ctx, bot, super_admin_id: int) -> bool:
 
     if state == "saisir_wallet_ton":
         uid = update.effective_user.id
-        if not (text.startswith("EQ") or text.startswith("UQ")):
-            await update.message.reply_text("⚠️ Adresse TON invalide (doit commencer par EQ ou UQ).")
+        if not WALLET_TON_PATTERN.match(text):
+            await update.message.reply_text("⚠️ Adresse TON invalide (doit commencer par EQ ou UQ et contenir 48 caractères).")
             return True
         db.users.update_one({"_id": uid}, {"$set": {"wallet_ton": text}})
         await update.message.reply_text("✅ Wallet TON enregistré !")
