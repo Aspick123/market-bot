@@ -16,6 +16,7 @@ Correctifs de sécurité v4.1 (audit) :
 - log.warning sur exceptions silencieuses
 
 v4.2 : Protection vendeur en cas de litige (preuves, rappels, absence de remboursement automatique si preuve)
+v4.7 : Gestion propre de la tâche scanner asynchrone (annulation à l'arrêt)
 """
 
 import os
@@ -48,7 +49,7 @@ db = client["bot_market_premium_db"]
 
 TIMEOUT_PAIEMENT_MIN = 30
 TIMEOUT_CONFIRMATION_MIN = 30
-SCAN_INTERVAL_SEC = 20
+SCAN_INTERVAL_SEC = int(os.environ.get("SCAN_INTERVAL_SEC", "20"))
 
 DELAI_RESOLUTION_LITIGE_JOURS = int(os.environ.get("DELAI_RESOLUTION_LITIGE_JOURS", "7"))
 
@@ -551,8 +552,8 @@ async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
         "escrow_id": escrow_id, "demandeur_id": acheteur_id, "vendeur_id": esc["vendeur_id"],
         "montant_ton": esc["montant_ton"], "statut": "ouvert", "date_creation": time.time(),
         "description": "Litige sur transaction Escrow", "via_escrow": True,
-        "preuve_vendeur": None,          # ajouté pour la protection vendeur
-        "dernier_rappel": None           # pour les alertes progressives
+        "preuve_vendeur": None,
+        "dernier_rappel": None
     }).inserted_id
 
     kb_admin = [[
@@ -567,7 +568,6 @@ async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
     except Exception as e:
         log.warning(f"Notification litige superadmin échouée : {e}")
 
-    # Envoyer message au vendeur avec bouton pour ajouter une preuve
     kb_vendeur = [[
         InlineKeyboardButton("📎 Ajouter une preuve", callback_data=f"tonact:ajouter_preuve:{escrow_id}")
     ]]
@@ -781,15 +781,21 @@ async def resume_hebdo_litiges(bot, team_channel_id):
 #  BOUCLE SCANNER & TIMEOUTS (avec protection vendeur)
 # ══════════════════════════════════════════════════════════════
 
+_scanner_task = None  # Pour stocker la tâche asynchrone du scanner
+
 async def boucle_scanner(bot):
     log.info("🔍 Scanner TON démarré.")
-    while True:
-        try:
-            await matcher_paiements(bot)
-            await verifier_timeouts(bot)
-        except Exception as e:
-            log.error(f"Erreur boucle scanner : {e}")
-        await asyncio.sleep(SCAN_INTERVAL_SEC)
+    try:
+        while True:
+            try:
+                await matcher_paiements(bot)
+                await verifier_timeouts(bot)
+            except Exception as e:
+                log.error(f"Erreur boucle scanner : {e}")
+            await asyncio.sleep(SCAN_INTERVAL_SEC)
+    except asyncio.CancelledError:
+        log.info("Scanner TON arrêté.")
+        raise
 
 async def verifier_timeouts(bot):
     now = datetime.datetime.now()
@@ -820,10 +826,8 @@ async def verifier_timeouts(bot):
         if not litige:
             continue
 
-        # Rappels progressifs
         dernier_rappel = litige.get("dernier_rappel")
         if jours_ecoules >= 3 and (dernier_rappel is None or dernier_rappel < 3):
-            # Rappel à l'équipe (gérants+)
             gerants = list(db.users.find({"role": {"$in": ["gerant", "admin"]}}))
             for g in gerants:
                 try:
@@ -843,7 +847,6 @@ async def verifier_timeouts(bot):
             db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 3}})
 
         if jours_ecoules >= 6 and (dernier_rappel is None or dernier_rappel < 6):
-            # Alerte critique au superadmin
             try:
                 await bot.send_message(super_admin_id,
                     f"🚨 <b>URGENT — Litige bientôt automatique</b>\n"
@@ -855,7 +858,6 @@ async def verifier_timeouts(bot):
             db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 6}})
 
         if jours_ecoules >= DELAI_RESOLUTION_LITIGE_JOURS:
-            # Action automatique seulement si aucune preuve vendeur
             if litige.get("preuve_vendeur") is None:
                 await rembourser_acheteur(bot, esc["_id"], 0, super_admin_id)
                 try:
@@ -864,7 +866,6 @@ async def verifier_timeouts(bot):
                 except Exception as e:
                     log.warning(f"Notification résolution auto litige : {e}")
             else:
-                # Preuve fournie : pas de remboursement automatique, on bloque et on alerte
                 log_audit("LITIGE_BLOQUE_PREUVE", f"Escrow {esc['_id']} preuve présente, pas de remboursement auto", 0)
                 try:
                     await bot.send_message(super_admin_id,
@@ -874,14 +875,22 @@ async def verifier_timeouts(bot):
                         parse_mode="HTML")
                 except Exception as e:
                     log.warning(f"Échec alerte litige bloqué : {e}")
-                # On empêche de re-déclencher l'action en mettant le dernier rappel à une valeur élevée
                 db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 999}})
 
 def demarrer_scanner(bot):
-    asyncio.create_task(boucle_scanner(bot))
+    global _scanner_task
+    _scanner_task = asyncio.create_task(boucle_scanner(bot))
+
+async def arreter_scanner():
+    if _scanner_task and not _scanner_task.done():
+        _scanner_task.cancel()
+        try:
+            await _scanner_task
+        except asyncio.CancelledError:
+            pass
 
 # ══════════════════════════════════════════════════════════════
-#  CALLBACK HANDLER (préfixe "tonact:")
+#  CALLBACK HANDLER (préfixe "tonact:") — inchangé
 # ══════════════════════════════════════════════════════════════
 
 async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
