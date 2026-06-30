@@ -32,6 +32,7 @@ Correctifs de sécurité v4.1 (audit 13 points) :
 
 v4.2 : Vérifications obligatoires (abonnement canal + acceptation CGU)
 v4.3 : Commande /info pour l'équipe (détails utilisateur)
+v4.4 : Liste des membres dans le panneau admin + tunnel d'achat conservé
 """
 
 import os
@@ -96,7 +97,7 @@ DEFAULTS_USER = {
     "banni_jusqua": 0, "tmp_litige_desc": "", "wallet_ton": "",
     "tickets": [],               # liste de {id, expiration, utilisé}
     "filleuls_qualifies": 0,     # compteur de filleuls avec annonce approuvée
-    "cgu_acceptees": False,      # ⬅️ Nouveau champ
+    "cgu_acceptees": False,
 }
 
 DEFAULTS_CONFIG = {
@@ -203,7 +204,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
 # ══════════════════════════════════════════════════════════════
 
 async def est_abonne_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """Vérifie si l'utilisateur est membre du canal public (ou admin/créateur)."""
     try:
         membre = await ctx.bot.get_chat_member(chat_id=PUBLIC_CHANNEL_ID, user_id=user_id)
         return membre.status in ["member", "administrator", "creator"]
@@ -212,18 +212,11 @@ async def est_abonne_canal(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool
         return False
 
 async def verifier_etapes_obligatoires(update: Update, ctx: ContextTypes.DEFAULT_TYPE, uid: int, u: dict) -> bool:
-    """
-    Renvoie True si l'utilisateur a passé toutes les étapes obligatoires (abonnement + CGU).
-    Sinon, envoie le message approprié et renvoie False.
-    Le superadmin est exempté.
-    """
     if uid == SUPER_ADMIN_ID:
         return True
 
-    # 1. Vérification de l'abonnement au canal
     if not await est_abonne_canal(ctx, uid):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ J'ai rejoint, vérifier", callback_data="nav:verifier_abonnement")]])
-        message = update.effective_message
         if update.callback_query:
             await update.callback_query.edit_message_text(
                 "🔒 Pour utiliser le bot, tu dois d'abord t'abonner à notre canal :\n👉 "
@@ -236,12 +229,10 @@ async def verifier_etapes_obligatoires(update: Update, ctx: ContextTypes.DEFAULT
                 reply_markup=kb)
         return False
 
-    # 2. Acceptation des CGU
     if not u.get("cgu_acceptees", False):
         cfg = get_config()
         cgu_texte = cfg.get("cgu_text", "CGU non disponibles.")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]])
-        message = update.effective_message
         if update.callback_query:
             await update.callback_query.edit_message_text(
                 f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{cgu_texte}\n\nEn appuyant sur le bouton, tu acceptes ces conditions.",
@@ -253,6 +244,13 @@ async def verifier_etapes_obligatoires(update: Update, ctx: ContextTypes.DEFAULT
         return False
 
     return True
+
+async def rediriger_apres_verifications(ctx, message, uid):
+    achat_id = ctx.user_data.pop("achat_attente", None)
+    if achat_id:
+        await proposer_choix_achat(message, ctx, achat_id, uid)
+        return True
+    return False
 
 # ══════════════════════════════════════════════════════════════
 #  MENU PRINCIPAL
@@ -319,7 +317,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uname = update.effective_user.username or f"User_{uid}"
     cfg = get_config()
 
-    # ═══════════ Vérifications d'accès (ban/urgence) ═══════════
     if is_blacklisted(uid) and uid != SUPER_ADMIN_ID:
         target = update.callback_query.message if update.callback_query else update.message
         await target.reply_text("🚫 Tu es banni du Marketplace.")
@@ -339,12 +336,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
-    # ═══════════ Vérifications abonnement + CGU ═══════════
-    if uid != SUPER_ADMIN_ID:
-        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
-            return
-
-    # ═══════════ Traitement des arguments (parrainage / achat) ═══════════
+    achat_attente = None
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -360,8 +352,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"Erreur traitement ref_: {e}")
         elif arg.startswith("acheter_"):
-            id_ann = arg.split("_", 1)[1]
-            await proposer_choix_achat(update.message, ctx, id_ann, uid)
+            achat_attente = arg.split("_", 1)[1]
+
+    if achat_attente:
+        ctx.user_data["achat_attente"] = achat_attente
+
+    if uid != SUPER_ADMIN_ID:
+        if not await verifier_etapes_obligatoires(update, ctx, uid, u):
+            return
+        if await rediriger_apres_verifications(ctx, update.effective_message, uid):
             return
 
     await afficher_menu_principal(update, ctx, uid, u)
@@ -475,7 +474,6 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
     uid = update.effective_user.id
     u = get_user(uid)
 
-    # Vérification étapes obligatoires (sauf pour le superadmin)
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
@@ -635,14 +633,11 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     uid = update.effective_user.id
     u = get_user(uid)
 
-    # Rate limiting
     if not check_callback_rate(uid):
         log.warning(f"Rate limit callback atteint pour {uid}")
         return
 
-    # ═══════════ Vérification étapes obligatoires (sauf pour callbacks spécifiques) ═══════════
     if uid != SUPER_ADMIN_ID:
-        # Permettre les callbacks liés à l'abonnement et aux CGU même sans être vérifié
         if data not in ("nav:verifier_abonnement", "nav:accepter_cgu"):
             if not await verifier_etapes_obligatoires(update, ctx, uid, u):
                 return
@@ -679,6 +674,10 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await handle_role_action(query, ctx, uid, parts)
         elif prefix == "blact":
             await handle_blacklist_action(query, ctx, uid, parts)
+        elif prefix == "memberspage":
+            await handle_members_page(query, ctx, uid, u, parts)
+        elif prefix == "memberinfo":
+            await handle_member_info(query, uid, parts)
     except Exception as e:
         log.error(f"Erreur callback '{data}' : {e}\n{traceback.format_exc()}")
         try:
@@ -692,10 +691,8 @@ async def handle_nav(query, ctx, uid, u, parts):
     cible = parts[1]
     cfg = get_config()
 
-    # ═══════════ Callbacks spéciaux pour les vérifications ═══════════
     if cible == "verifier_abonnement":
         if uid != SUPER_ADMIN_ID and await est_abonne_canal(ctx, uid):
-            # Vérifier si CGU acceptées, sinon les proposer
             if not u.get("cgu_acceptees", False):
                 cgu_texte = cfg.get("cgu_text", "")
                 await query.message.edit_text(
@@ -704,6 +701,8 @@ async def handle_nav(query, ctx, uid, u, parts):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]]))
                 return
             else:
+                if await rediriger_apres_verifications(ctx, query.message, uid):
+                    return
                 await afficher_menu_principal(None, ctx, uid, u, message=query.message)
                 return
         else:
@@ -714,10 +713,11 @@ async def handle_nav(query, ctx, uid, u, parts):
         if uid != SUPER_ADMIN_ID:
             save_user(uid, {"cgu_acceptees": True})
             await query.answer("✅ CGU acceptées !", show_alert=True)
+            if await rediriger_apres_verifications(ctx, query.message, uid):
+                return
             await afficher_menu_principal(None, ctx, uid, u, message=query.message)
             return
 
-    # ═══════════ Navigation standard ═══════════
     if cible == "retour":
         await afficher_menu_principal(None, ctx, uid, u, message=query.message)
 
@@ -871,6 +871,7 @@ async def afficher_admin_root(query, ctx, uid, u):
         [InlineKeyboardButton("📋 Annonces en attente", callback_data="admact:voir_attente"),
          InlineKeyboardButton("✏️ Modifications", callback_data="admact:voir_modifs")],
         [InlineKeyboardButton("⚖️ Litiges", callback_data="admact:voir_litiges")],
+        [InlineKeyboardButton("👥 Liste des membres", callback_data="admact:liste_membres")],
     ]
     if has_level(uid, u, "admin"):
         kb.append([InlineKeyboardButton("🚫 Gérer Blacklist", callback_data="admact:gerer_blacklist")])
@@ -886,6 +887,87 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("💸 Rémunération équipe", callback_data="tonact:rapport_remuneration")])
     kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
     await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+# ──────────────── LISTE DES MEMBRES (paginée) ────────────────
+
+async def handle_members_page(query, ctx, uid, u, parts):
+    if not has_level(uid, u, "gerant"):
+        await query.answer("🚫 Accès réservé à l'équipe.", show_alert=True)
+        return
+    try:
+        page = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        page = 0
+    per_page = 10
+    total = db.users.count_documents({})
+    max_page = (total - 1) // per_page if total > 0 else 0
+    if page < 0: page = 0
+    if page > max_page: page = max_page
+
+    users = list(db.users.find({}).sort("date_inscription", -1).skip(page * per_page).limit(per_page))
+    txt = f"👥 <b>LISTE DES MEMBRES</b> (page {page+1}/{max_page+1})\n\n"
+    kb = []
+    for memb in users:
+        mid = memb["_id"]
+        uname = memb.get("username", "Inconnu")
+        role = memb.get("role", "membre")
+        date_inscr = fmt_date(memb.get("date_inscription", 0))
+        bl = "🚫" if is_blacklisted(mid) else ""
+        txt += f"{bl}<code>{mid}</code> — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
+        kb.append([InlineKeyboardButton(f"🔍 Détails {mid}", callback_data=f"memberinfo:{mid}")])
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"memberspage:{page-1}"))
+    if page < max_page:
+        nav_buttons.append(InlineKeyboardButton("Suivant ▶️", callback_data=f"memberspage:{page+1}"))
+    if nav_buttons:
+        kb.append(nav_buttons)
+    kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+    await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+async def handle_member_info(query, uid, parts):
+    if not has_level(uid, get_user(uid), "gerant"):
+        await query.answer("🚫 Accès réservé à l'équipe.", show_alert=True)
+        return
+    try:
+        target_id = int(parts[1])
+    except (IndexError, ValueError):
+        await query.answer("ID invalide.")
+        return
+    target = db.users.find_one({"_id": target_id})
+    if not target:
+        await query.answer("Utilisateur introuvable.")
+        return
+    role = get_role(target_id, target)
+    blacklist_status = "🚫 OUI" if is_blacklisted(target_id) else "✅ Non"
+    nb_annonces_actives = db.annonces.count_documents({"vendeur_id": target_id, "statut": "approuve"})
+    nb_ventes = db.annonces.count_documents({"vendeur_id": target_id, "statut": "vendu"})
+    derniere_annonces = list(db.annonces.find(
+        {"vendeur_id": target_id, "statut": {"$ne": "brouillon"}}
+    ).sort("date_creation", -1).limit(3))
+    txt = (
+        f"👤 <b>FICHE UTILISATEUR</b>\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        f"🆔 <b>ID :</b> <code>{target_id}</code>\n"
+        f"👤 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
+        f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
+        f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
+        f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
+        f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
+        f"🚫 <b>Blacklisté :</b> {blacklist_status}\n"
+        f"📅 <b>Inscription :</b> {fmt_date(target.get('date_inscription', 0))}\n"
+        f"📦 <b>Annonces actives :</b> {nb_annonces_actives}\n"
+        f"🏷️ <b>Ventes validées :</b> {nb_ventes}\n"
+        f"🎁 <b>Filleuls qualifiés :</b> {target.get('filleuls_qualifies', 0)}\n"
+        f"⚡ <b>Points :</b> {target.get('points', 0)}\n"
+    )
+    if derniere_annonces:
+        txt += "\n📌 <b>Dernières annonces :</b>\n"
+        for ann in derniere_annonces:
+            statut_lbl = {"en_attente": "🟡", "approuve": "✅", "rejete": "❌", "vendu": "🏷️"}.get(ann.get("statut"), "❓")
+            txt += f"{statut_lbl} {safe_html(ann.get('categorie','?'))} — {safe_html(ann.get('prix','?'))} {safe_html(ann.get('devise','?'))}\n"
+    kb = [[InlineKeyboardButton("🔙 Retour à la liste", callback_data="memberspage:0")]]
+    await query.message.edit_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 # ──────────────── SETPROF ────────────────
 
@@ -948,7 +1030,6 @@ async def handle_moderation(query, ctx, parts):
         db.annonces.update_one({"_id": oid}, {"$set": update_fields})
         log_audit("ANNONCE_APPROUVEE", str(oid), query.from_user.id)
 
-        # Incrémente filleuls qualifiés du parrain si vendeur a un parrain
         parrain = v.get("parrain")
         if parrain and parrain != item["vendeur_id"]:
             filleuls_qualifies = db.users.find_one_and_update(
@@ -1208,6 +1289,11 @@ async def handle_admin_action(query, ctx, uid, parts):
         await query.answer("🚫 Réservé à l'équipe.", show_alert=True); return
     act = parts[1]
     cfg = get_config()
+
+    if act == "liste_membres":
+        # Redirection vers la page 0
+        await handle_members_page(query, ctx, uid, u, ["memberspage", "0"])
+        return
 
     if act == "voir_attente":
         items = list(db.annonces.find({"statut": "en_attente"}).limit(10))
@@ -1498,7 +1584,6 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
 
-    # Vérification étapes obligatoires (sauf superadmin et si déjà en train de gérer admin states)
     if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID"):
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
