@@ -10,6 +10,8 @@ v4.6 – Corrections critiques + améliorations
 - Bouton CGU/CGV corrigé : affichage + acceptation intégrée
 - safe_edit utilisé pour tous les callbacks de navigation
 - Nouveau token intégré
+- Correction balise HTML invalide dans l'aide
+- Troncature CGU à 4000 caractères
 """
 
 import os
@@ -374,7 +376,7 @@ HELP_TEXT = (
     "/start – Menu principal\n"
     "/help – Cette aide\n"
     "/alerte [jeu] – Être notifié des nouvelles annonces pour un jeu\n"
-    "/info <ID> – (équipe) Fiche détaillée d'un membre"
+    "/info [id] – (équipe) Fiche détaillée d'un membre"
 )
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -751,11 +753,15 @@ async def handle_nav(query, ctx, uid, u, parts):
         return
 
     if cible == "cgu":
+        cgu_texte = cfg.get('cgu_text','')
+        # Limiter à 4000 caractères pour laisser la place aux balises HTML
+        if len(cgu_texte) > 4000:
+            cgu_texte = cgu_texte[:4000] + "...\n\n(texte complet dans le message original)"
         kb_rows = []
         if not u.get("cgu_acceptees", False):
             kb_rows.append([InlineKeyboardButton("✅ J'accepte les CGU", callback_data="nav:accepter_cgu")])
         kb_rows.append([InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")])
-        await safe_edit(query, f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cfg.get('cgu_text',''))}",
+        await safe_edit(query, f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cgu_texte)}",
                         reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
         return
 
