@@ -14,6 +14,8 @@ Correctifs de sécurité v4.1 (audit) :
 - Ticket parrainage atomique
 - Log consommation ticket
 - log.warning sur exceptions silencieuses
+
+v4.2 : Protection vendeur en cas de litige (preuves, rappels, absence de remboursement automatique si preuve)
 """
 
 import os
@@ -32,7 +34,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 log = logging.getLogger("EscrowTON")
 
 # ══════════════════════════════════════════════════════════════
-#  CONFIGURATION & CONNEXION (partage la même base que bot_market)
+#  CONFIGURATION & CONNEXION
 # ══════════════════════════════════════════════════════════════
 
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
@@ -48,10 +50,8 @@ TIMEOUT_PAIEMENT_MIN = 30
 TIMEOUT_CONFIRMATION_MIN = 30
 SCAN_INTERVAL_SEC = 20
 
-# Correctif 7 : Délai de résolution litige (en jours)
 DELAI_RESOLUTION_LITIGE_JOURS = int(os.environ.get("DELAI_RESOLUTION_LITIGE_JOURS", "7"))
 
-# Correctif 5 : Pattern regex pour adresse wallet TON
 WALLET_TON_PATTERN = re.compile(r'^(EQ|UQ)[A-Za-z0-9_-]{46}$')
 
 DEFAULTS_ESCROW_CONFIG = {
@@ -96,7 +96,7 @@ def log_audit(action: str, details: str, acted_by: int):
     })
 
 # ══════════════════════════════════════════════════════════════
-#  CONVERSION DEVISE → TON (live + filet de sécurité)
+#  CONVERSION DEVISE → TON (inchangé)
 # ══════════════════════════════════════════════════════════════
 
 ALIASES_DEVISE = {
@@ -149,7 +149,6 @@ async def get_usd_to_currency_rate(code: str) -> float:
     return None
 
 async def convertir_en_ton(montant: float, devise_texte: str):
-    """Retourne (montant_ton, code_devise, fallback_utilise: bool) ou (None, None, None) si impossible."""
     cfg = get_escrow_config()
     code = normaliser_devise(devise_texte)
 
@@ -189,7 +188,7 @@ def save_escrow_update(escrow_id, data: dict):
         db.escrows.update_one({"_id": oid}, {"$set": data})
 
 # ══════════════════════════════════════════════════════════════
-#  INITIATION DE L'ESCROW (depuis le choix Direct/Escrow)
+#  INITIATION DE L'ESCROW (inchangé)
 # ══════════════════════════════════════════════════════════════
 
 async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str):
@@ -214,7 +213,6 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
     deadline = now + datetime.timedelta(minutes=TIMEOUT_PAIEMENT_MIN)
     cfg = get_escrow_config()
 
-    # Vérification ticket sans commission
     u = db.users.find_one({"_id": acheteur_id})
     ticket_utilise = None
     if u and u.get("tickets"):
@@ -241,7 +239,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         "tx_hash": None,
         "expediteur_wallet": None,
         "vendeur_wallet": None,
-        "ticket_id": ticket_utilise,      # sera utilisé lors de la libération
+        "ticket_id": ticket_utilise,
     }
     escrow_id = db.escrows.insert_one(escrow_doc).inserted_id
     memo = generer_memo(escrow_id)
@@ -270,7 +268,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
     return escrow_id
 
 # ══════════════════════════════════════════════════════════════
-#  SCANNER BLOCKCHAIN TON
+#  SCANNER BLOCKCHAIN TON (inchangé)
 # ══════════════════════════════════════════════════════════════
 
 async def scanner_transactions_ton() -> list:
@@ -337,9 +335,8 @@ async def matcher_paiements(bot):
                 deadline = datetime.datetime.fromisoformat(esc["deadline_paiement"])
                 if datetime.datetime.now() > deadline:
                     db.escrows.update_one({"_id": esc["_id"]}, {"$set": {"statut": "expire"}})
-                    # Correctif 9 : alerte paiement orphelin
+                    super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
                     try:
-                        super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
                         await bot.send_message(super_admin_id,
                             f"⚠️ Paiement orphelin détecté : memo {memo}, montant {montant} TON, tx {tx_hash[:10]}...")
                     except Exception as e:
@@ -352,9 +349,8 @@ async def matcher_paiements(bot):
             matched = True
             break
         if not matched:
-            # Paiement sans escrow correspondant
+            super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
             try:
-                super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
                 await bot.send_message(super_admin_id,
                     f"⚠️ Paiement entrant non reconnu : memo {memo}, {montant} TON depuis {expediteur[:10]}...")
             except Exception as e:
@@ -404,7 +400,7 @@ async def acces_envoyes(bot, escrow_id, vendeur_id):
         log.warning(f"Échec notification accès envoyés : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  TRANSFERT TON RÉEL
+#  TRANSFERT TON RÉEL (inchangé)
 # ══════════════════════════════════════════════════════════════
 
 async def envoyer_ton(to_address: str, amount_ton: float, comment: str = "") -> bool:
@@ -449,7 +445,7 @@ async def get_seqno(address: str) -> int:
     return 0
 
 # ══════════════════════════════════════════════════════════════
-#  CONFIRMATION RÉCEPTION → LIBÉRATION DES FONDS
+#  CONFIRMATION RÉCEPTION → LIBÉRATION DES FONDS (inchangé)
 # ══════════════════════════════════════════════════════════════
 
 async def confirmer_reception(bot, escrow_id, acheteur_id):
@@ -462,7 +458,6 @@ async def confirmer_reception(bot, escrow_id, acheteur_id):
     await liberer_fonds(bot, escrow_id, esc)
 
 async def liberer_fonds(bot, escrow_id, esc: dict):
-    # Correctif 6 : Verrou atomique anti-double-traitement
     lock_result = db.escrows.find_one_and_update(
         {"_id": ObjectId(escrow_id),
          "statut": {"$in": ["confirme", "attente_wallet_vendeur"]},
@@ -477,7 +472,6 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
     montant = esc.get("montant_recu", esc["montant_ton"])
     commission_pct = esc.get("commission_pct", cfg.get("commission_pct", 5))
 
-    # Correctif 10+11 : Consommation ticket de parrainage atomique
     ticket_id = esc.get("ticket_id")
     if ticket_id:
         update_res = db.users.find_one_and_update(
@@ -485,7 +479,7 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
             {"$set": {"tickets.$.utilise": True}}
         )
         if update_res:
-            commission_pct = 0  # Pas de commission
+            commission_pct = 0
             log_audit("TICKET_CONSOMME", f"Escrow {escrow_id} ticket {ticket_id}", esc["acheteur_id"])
         else:
             log.warning(f"Ticket {ticket_id} déjà utilisé ou expiré pour l'utilisateur {esc['acheteur_id']}")
@@ -506,19 +500,16 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
                                        "commission_calc": commission, "liberation_en_cours": False})
         return
 
-    # Envoi au vendeur
     success_v = await envoyer_ton(vendeur_wallet, montant_vendeur, f"Vente ESC{str(escrow_id)[-6:]}")
 
-    # Envoi commission si applicable
     commission_ok = True
     if commission > 0:
         admin_wallet = cfg.get("admin_ton_wallet", "")
         if admin_wallet:
             commission_ok = await envoyer_ton(admin_wallet, commission, f"Commission ESC{str(escrow_id)[-6:]}")
             if not commission_ok:
-                # Correctif 8 : alerter superadmin si échec commission
+                super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
                 try:
-                    super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
                     await bot.send_message(super_admin_id,
                         f"⚠️ Échec de l'envoi de la commission de {commission} TON pour ESC{str(escrow_id)[-6:]} vers {admin_wallet}")
                 except Exception as e:
@@ -548,7 +539,7 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
             log.warning(f"Notification échec transfert vendeur : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  LITIGE ESCROW + DOUBLE VALIDATION
+#  LITIGE ESCROW + DOUBLE VALIDATION (avec protection vendeur)
 # ══════════════════════════════════════════════════════════════
 
 async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
@@ -559,10 +550,12 @@ async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
     lit_id = db.litiges.insert_one({
         "escrow_id": escrow_id, "demandeur_id": acheteur_id, "vendeur_id": esc["vendeur_id"],
         "montant_ton": esc["montant_ton"], "statut": "ouvert", "date_creation": time.time(),
-        "description": "Litige sur transaction Escrow", "via_escrow": True
+        "description": "Litige sur transaction Escrow", "via_escrow": True,
+        "preuve_vendeur": None,          # ajouté pour la protection vendeur
+        "dernier_rappel": None           # pour les alertes progressives
     }).inserted_id
 
-    kb = [[
+    kb_admin = [[
         InlineKeyboardButton("💰 Rembourser acheteur", callback_data=f"tonact:rembourser:{escrow_id}"),
         InlineKeyboardButton("✅ Libérer vendeur", callback_data=f"tonact:forcer_liberer:{escrow_id}")
     ]]
@@ -570,14 +563,36 @@ async def ouvrir_litige_escrow(bot, escrow_id, acheteur_id, super_admin_id):
         await bot.send_message(super_admin_id,
             f"🚨 <b>LITIGE ESCROW — {esc['montant_ton']} TON</b>\n\n"
             f"Acheteur : <code>{acheteur_id}</code>\nVendeur : <code>{esc['vendeur_id']}</code>",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_admin))
     except Exception as e:
         log.warning(f"Notification litige superadmin échouée : {e}")
+
+    # Envoyer message au vendeur avec bouton pour ajouter une preuve
+    kb_vendeur = [[
+        InlineKeyboardButton("📎 Ajouter une preuve", callback_data=f"tonact:ajouter_preuve:{escrow_id}")
+    ]]
+    try:
+        await bot.send_message(esc["vendeur_id"],
+            "⚖️ Un litige a été ouvert sur cette vente. Les fonds sont bloqués.\n"
+            "Si vous avez bien livré, merci d'ajouter une preuve pour éviter un remboursement automatique.",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_vendeur))
+    except Exception as e:
+        log.warning(f"Notification vendeur litige échouée : {e}")
+
     try:
         await bot.send_message(acheteur_id, "⚖️ Litige ouvert. Les fonds sont bloqués en attente de résolution.")
-        await bot.send_message(esc["vendeur_id"], "⚖️ Un litige a été ouvert sur cette vente. Fonds bloqués.")
     except Exception as e:
-        log.warning(f"Notification litige parties échouée : {e}")
+        log.warning(f"Notification acheteur litige échouée : {e}")
+
+async def ajouter_preuve_litige(bot, escrow_id, vendeur_id, contenu, est_photo=False):
+    esc = get_escrow(escrow_id)
+    if not esc or esc["vendeur_id"] != vendeur_id:
+        return False
+    litige = db.litiges.find_one({"escrow_id": escrow_id, "statut": "ouvert"})
+    if not litige:
+        return False
+    db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"preuve_vendeur": contenu, "preuve_type": "photo" if est_photo else "texte"}})
+    return True
 
 async def rembourser_acheteur(bot, escrow_id, acted_by, super_admin_id):
     esc = get_escrow(escrow_id)
@@ -654,7 +669,7 @@ async def traiter_double_validation(bot, escrow_id, valider: bool, super_admin_i
             log.warning(f"Notification refus double validation : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  REÇU DE TRANSACTION (PDF)
+#  REÇU DE TRANSACTION (PDF) — inchangé
 # ══════════════════════════════════════════════════════════════
 
 async def generer_recu(bot, escrow_id, esc: dict, montant_total, montant_vendeur, commission):
@@ -694,7 +709,7 @@ async def generer_recu(bot, escrow_id, esc: dict, montant_total, montant_vendeur
         log.error(f"Erreur génération reçu : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  RÉMUNÉRATION ÉQUIPE
+#  RÉMUNÉRATION ÉQUIPE — inchangé
 # ══════════════════════════════════════════════════════════════
 
 def ajouter_points_gerant(gerant_id: int, points: int, action: str):
@@ -735,7 +750,7 @@ async def payer_gerant(bot, gerant_id: int, montant_ton: float, super_admin_id):
     return False, "Échec de l'envoi TON."
 
 # ══════════════════════════════════════════════════════════════
-#  AUDIT & ANOMALIES
+#  AUDIT & ANOMALIES — inchangé
 # ══════════════════════════════════════════════════════════════
 
 def detecter_favoritisme(admin_id: int, beneficiaire_id: int) -> bool:
@@ -763,7 +778,7 @@ async def resume_hebdo_litiges(bot, team_channel_id):
         log.warning(f"Envoi résumé hebdo échoué : {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  BOUCLE SCANNER & TIMEOUTS
+#  BOUCLE SCANNER & TIMEOUTS (avec protection vendeur)
 # ══════════════════════════════════════════════════════════════
 
 async def boucle_scanner(bot):
@@ -778,7 +793,7 @@ async def boucle_scanner(bot):
 
 async def verifier_timeouts(bot):
     now = datetime.datetime.now()
-    # Timeout confirmation acheteur
+    # Timeout confirmation acheteur (inchangé)
     for esc in db.escrows.find({"statut": {"$in": ["fonds_bloques", "acces_envoyes"]}}):
         if not esc.get("deadline_confirmation"):
             continue
@@ -789,23 +804,78 @@ async def verifier_timeouts(bot):
         except Exception as e:
             log.warning(f"Erreur timeout confirmation : {e}")
 
-    # Correctif 7 : Timeout automatique des litiges
+    # Gestion des litiges avec protection vendeur
+    super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
     for esc in db.escrows.find({"statut": "litige"}):
         date_litige_str = esc.get("date_litige")
         if not date_litige_str:
             continue
         try:
             date_litige_dt = datetime.datetime.strptime(date_litige_str, "%d/%m/%Y %H:%M")
-            if (now - date_litige_dt).days >= DELAI_RESOLUTION_LITIGE_JOURS:
-                await rembourser_acheteur(bot, esc["_id"], 0, 0)
-                super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
+            jours_ecoules = (now - date_litige_dt).days
+        except Exception:
+            continue
+
+        litige = db.litiges.find_one({"escrow_id": esc["_id"], "statut": "ouvert"})
+        if not litige:
+            continue
+
+        # Rappels progressifs
+        dernier_rappel = litige.get("dernier_rappel")
+        if jours_ecoules >= 3 and (dernier_rappel is None or dernier_rappel < 3):
+            # Rappel à l'équipe (gérants+)
+            gerants = list(db.users.find({"role": {"$in": ["gerant", "admin"]}}))
+            for g in gerants:
+                try:
+                    await bot.send_message(g["_id"],
+                        f"🔔 <b>Litige non résolu depuis 3 jours</b>\n"
+                        f"Escrow : {esc['_id']}\nVendeur : {esc['vendeur_id']}\nAcheteur : {esc['acheteur_id']}\n"
+                        f"Preuve vendeur : {'oui' if litige.get('preuve_vendeur') else 'non'}",
+                        parse_mode="HTML")
+                except Exception as e:
+                    log.warning(f"Échec rappel 3 jours à {g['_id']}: {e}")
+            try:
+                await bot.send_message(super_admin_id,
+                    f"🔔 Litige ESC{str(esc['_id'])[-6:]} non résolu depuis 3 jours (rappel envoyé à l'équipe).",
+                    parse_mode="HTML")
+            except Exception as e:
+                log.warning(f"Échec notification superadmin 3 jours : {e}")
+            db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 3}})
+
+        if jours_ecoules >= 6 and (dernier_rappel is None or dernier_rappel < 6):
+            # Alerte critique au superadmin
+            try:
+                await bot.send_message(super_admin_id,
+                    f"🚨 <b>URGENT — Litige bientôt automatique</b>\n"
+                    f"Escrow : {esc['_id']}\nVendeur : {esc['vendeur_id']}\nAcheteur : {esc['acheteur_id']}\n"
+                    f"Jours restants avant remboursement automatique : {DELAI_RESOLUTION_LITIGE_JOURS - jours_ecoules}",
+                    parse_mode="HTML")
+            except Exception as e:
+                log.warning(f"Échec alerte 6 jours : {e}")
+            db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 6}})
+
+        if jours_ecoules >= DELAI_RESOLUTION_LITIGE_JOURS:
+            # Action automatique seulement si aucune preuve vendeur
+            if litige.get("preuve_vendeur") is None:
+                await rembourser_acheteur(bot, esc["_id"], 0, super_admin_id)
                 try:
                     await bot.send_message(super_admin_id,
-                        f"⏰ Litige ESC{str(esc['_id'])[-6:]} résolu automatiquement (délai {DELAI_RESOLUTION_LITIGE_JOURS}j).")
+                        f"⏰ Litige ESC{str(esc['_id'])[-6:]} résolu automatiquement (délai {DELAI_RESOLUTION_LITIGE_JOURS}j, aucune preuve vendeur).")
                 except Exception as e:
-                    log.warning(f"Notification résolution auto litige échouée : {e}")
-        except Exception as e:
-            log.warning(f"Erreur parsing date litige : {e}")
+                    log.warning(f"Notification résolution auto litige : {e}")
+            else:
+                # Preuve fournie : pas de remboursement automatique, on bloque et on alerte
+                log_audit("LITIGE_BLOQUE_PREUVE", f"Escrow {esc['_id']} preuve présente, pas de remboursement auto", 0)
+                try:
+                    await bot.send_message(super_admin_id,
+                        f"🛑 <b>Litige ESC{str(esc['_id'])[-6:]} : délai de {DELAI_RESOLUTION_LITIGE_JOURS} jours atteint, mais le vendeur a fourni une preuve.</b>\n"
+                        f"Le remboursement automatique est annulé. Une intervention manuelle est nécessaire.\n"
+                        f"Vendeur : {esc['vendeur_id']} / Acheteur : {esc['acheteur_id']}",
+                        parse_mode="HTML")
+                except Exception as e:
+                    log.warning(f"Échec alerte litige bloqué : {e}")
+                # On empêche de re-déclencher l'action en mettant le dernier rappel à une valeur élevée
+                db.litiges.update_one({"_id": litige["_id"]}, {"$set": {"dernier_rappel": 999}})
 
 def demarrer_scanner(bot):
     asyncio.create_task(boucle_scanner(bot))
@@ -859,6 +929,14 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
         await traiter_double_validation(bot, parts[2], False, super_admin_id)
         await query.message.reply_text("❌ Refusé.")
 
+    elif act == "ajouter_preuve":
+        ctx.user_data["ton_state"] = "ajout_preuve_litige"
+        ctx.user_data["preuve_escrow_id"] = parts[2]
+        await query.message.reply_text(
+            "📎 Envoyez une capture d'écran ou une description comme preuve de livraison.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+        )
+
     elif act == "payer_gerant":
         gerant_id = int(parts[2])
         s = db.team_stats.find_one({"_id": gerant_id}) or {}
@@ -882,6 +960,7 @@ async def handle_ton_input(update, ctx, bot, super_admin_id: int) -> bool:
     if not state:
         return False
     text = update.message.text.strip() if update.message and update.message.text else ""
+    photo = update.message.photo[-1].file_id if update.message and update.message.photo else None
 
     if state == "saisir_montant_paiement":
         try:
@@ -899,7 +978,7 @@ async def handle_ton_input(update, ctx, bot, super_admin_id: int) -> bool:
     if state == "saisir_wallet_ton":
         uid = update.effective_user.id
         if not WALLET_TON_PATTERN.match(text):
-            await update.message.reply_text("⚠️ Adresse TON invalide (doit commencer par EQ ou UQ et contenir 48 caractères).")
+            await update.message.reply_text("⚠️ Adresse TON invalide (format EQ... ou UQ... 48 caractères).")
             return True
         db.users.update_one({"_id": uid}, {"$set": {"wallet_ton": text}})
         await update.message.reply_text("✅ Wallet TON enregistré !")
@@ -908,6 +987,27 @@ async def handle_ton_input(update, ctx, bot, super_admin_id: int) -> bool:
         esc_attente = db.escrows.find_one({"vendeur_id": uid, "statut": "attente_wallet_vendeur"})
         if esc_attente:
             await liberer_fonds(bot, esc_attente["_id"], esc_attente)
+        return True
+
+    if state == "ajout_preuve_litige":
+        escrow_id = ctx.user_data.get("preuve_escrow_id")
+        if not escrow_id:
+            await update.message.reply_text("Erreur, identifiant du litige manquant.")
+            ctx.user_data.pop("ton_state", None)
+            return True
+        uid = update.effective_user.id
+        contenu = photo if photo else text
+        est_photo = bool(photo)
+        if not contenu:
+            await update.message.reply_text("Veuillez envoyer une photo ou un texte.")
+            return True
+        success = await ajouter_preuve_litige(bot, escrow_id, uid, contenu, est_photo)
+        if success:
+            await update.message.reply_text("✅ Preuve enregistrée. L'équipe en tiendra compte pour trancher le litige.")
+        else:
+            await update.message.reply_text("❌ Impossible d'ajouter la preuve (litige clos ou accès refusé).")
+        ctx.user_data.pop("ton_state", None)
+        ctx.user_data.pop("preuve_escrow_id", None)
         return True
 
     return False
