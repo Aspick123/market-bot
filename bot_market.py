@@ -5,10 +5,11 @@
 ╚══════════════════════════════════════════════════════════════╝
 
 v4.6 – Corrections critiques + améliorations
-- Achat par lien profond totalement réparé (stockage base, reprise automatique)
+- Achat par lien profond réparé (stockage base)
 - Bouton Aide dans le menu (liste des commandes)
 - Bouton CGU/CGV corrigé : affichage + acceptation intégrée
-- Toutes les fonctionnalités antérieures conservées
+- safe_edit utilisé pour tous les callbacks de navigation
+- Nouveau token intégré
 """
 
 import os
@@ -71,7 +72,7 @@ DEFAULTS_USER = {
     "tickets": [],
     "filleuls_qualifies": 0,
     "cgu_acceptees": False,
-    "evaluations": [],       # liste de {de_user_id, note, commentaire, date}
+    "evaluations": [],
 }
 
 DEFAULTS_CONFIG = {
@@ -216,12 +217,11 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
 # ══════════════════════════════════════════════════════════════
 
 async def traiter_achat_en_attente(ctx, update, uid):
-    """Vérifie si un achat est en attente pour cet utilisateur et le déclenche."""
     doc = db.achat_attente.find_one({"user_id": uid})
     if not doc:
         return False
     annonce_id = doc["annonce_id"]
-    db.achat_attente.delete_one({"user_id": uid})  # Nettoyage immédiat
+    db.achat_attente.delete_one({"user_id": uid})
     try:
         message = update.effective_message if update else None
         if not message:
@@ -238,7 +238,7 @@ async def traiter_achat_en_attente(ctx, update, uid):
             )
         except Exception:
             pass
-        return True  # On considère l'achat comme traité (même en erreur) pour ne pas bloquer
+        return True
 
 # ══════════════════════════════════════════════════════════════
 #  MENU PRINCIPAL (avec bouton Aide)
@@ -257,7 +257,7 @@ def build_main_menu(uid, u, cfg):
          InlineKeyboardButton("🔔 Alertes Jeux", callback_data="nav:mes_alertes")],
         [InlineKeyboardButton("⚖️ Centre des Litiges", callback_data="nav:mes_litiges")],
         [InlineKeyboardButton("🚫 Blacklist publique", callback_data="nav:blacklist_pub")],
-        [InlineKeyboardButton("❓ Aide", callback_data="nav:help")],  # Nouveau
+        [InlineKeyboardButton("❓ Aide", callback_data="nav:help")],
     ]
     if cfg.get("recrutement_ouvert") and get_role(uid, u) == "membre":
         kb.append([InlineKeyboardButton("🎯 Devenir Gérant", callback_data="nav:devenir_gerant")])
@@ -298,7 +298,7 @@ async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
         await query.message.reply_text("Tu as déjà un brouillon en cours. Continue ou annule.")
 
 # ══════════════════════════════════════════════════════════════
-#  COMMANDE /start (avec sauvegarde achat en base)
+#  COMMANDE /start
 # ══════════════════════════════════════════════════════════════
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -325,7 +325,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
-    # Traitement des arguments (parrainage / achat)
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -342,14 +341,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 log.warning(f"Erreur traitement ref_: {e}")
         elif arg.startswith("acheter_"):
             annonce_id = arg.split("_", 1)[1]
-            # Stockage en base pour persistance même après redémarrage
             db.achat_attente.update_one(
                 {"user_id": uid},
                 {"$set": {"annonce_id": annonce_id, "date": time.time()}},
                 upsert=True
             )
 
-    # Vérifications obligatoires
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
@@ -384,7 +381,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
 
 # ══════════════════════════════════════════════════════════════
-#  TUNNEL DE VENTE (photo obligatoire, album, confirmation)
+#  TUNNEL DE VENTE (photo obligatoire)
 # ══════════════════════════════════════════════════════════════
 
 LIMITES = {
@@ -708,7 +705,7 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             log.warning(f"Impossible de notifier l'erreur callback: {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  NAVIGATION (avec nouvel aide, cgu corrigé, reprise achat)
+#  NAVIGATION (correction safe_edit pour help et cgu)
 # ══════════════════════════════════════════════════════════════
 
 async def handle_nav(query, ctx, uid, u, parts):
@@ -750,18 +747,16 @@ async def handle_nav(query, ctx, uid, u, parts):
 
     if cible == "help":
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")]])
-        await query.message.edit_text(HELP_TEXT, parse_mode="HTML", reply_markup=kb)
+        await safe_edit(query, HELP_TEXT, reply_markup=kb, parse_mode="HTML")
         return
 
     if cible == "cgu":
-        # Afficher les CGU, avec bouton d'acceptation si pas encore acceptées
         kb_rows = []
         if not u.get("cgu_acceptees", False):
             kb_rows.append([InlineKeyboardButton("✅ J'accepte les CGU", callback_data="nav:accepter_cgu")])
         kb_rows.append([InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")])
-        await query.message.edit_text(
-            f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cfg.get('cgu_text',''))}",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_rows))
+        await safe_edit(query, f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cfg.get('cgu_text',''))}",
+                        reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
         return
 
     # --- Les autres cibles (inchangées) ---
@@ -896,8 +891,6 @@ async def handle_nav(query, ctx, uid, u, parts):
             await query.answer("⚠️ Accès réservé à l'équipe.", show_alert=True)
             return
         await afficher_admin_root(query, ctx, uid, u)
-
-# (La suite du code avec toutes les autres fonctions est inchangée. Je les inclus ci-dessous.)
 
 # ──────────────── GESTION PHOTOS (fin_photos vérifie photo obligatoire) ────────────────
 
