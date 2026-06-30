@@ -1,19 +1,14 @@
-# Fichier bot_market.py complet avec la correction de l'erreur CallbackQuery
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║         BOT MARKET ULTRA v4.0 — VERSION FINALE               ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.6 – Corrections critiques + améliorations
-- Achat par lien profond réparé (stockage base)
-- Bouton Aide dans le menu (liste des commandes)
-- Bouton CGU/CGV corrigé : affichage + acceptation intégrée
-- safe_edit utilisé pour tous les callbacks de navigation
-- Nouveau token intégré
-- Correction balise HTML invalide dans l'aide
-- Troncature CGU à 4000 caractères
-- Correction erreur 'CallbackQuery' object has no attribute 'effective_message'
+v4.7 – Ajouts :
+- Suppression d'annonce par l'équipe (admin)
+- Rappel automatique de validité des annonces (30j / 3j)
+- Arrêt propre du scanner TON (post_shutdown)
+- Corrections précédentes (CGU, aide, achat par lien, etc.)
 """
 
 import os
@@ -217,7 +212,7 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     return True
 
 # ══════════════════════════════════════════════════════════════
-#  GESTION DE L'ACHAT EN ATTENTE (corrigée)
+#  GESTION DE L'ACHAT EN ATTENTE (stockage base)
 # ══════════════════════════════════════════════════════════════
 
 async def traiter_achat_en_attente(ctx, update, uid):
@@ -227,12 +222,8 @@ async def traiter_achat_en_attente(ctx, update, uid):
     annonce_id = doc["annonce_id"]
     db.achat_attente.delete_one({"user_id": uid})
     try:
-        # Déterminer le message selon le type d'update
-        if isinstance(update, Update) and update.effective_message:
-            message = update.effective_message
-        elif hasattr(update, 'message') and update.message:
-            message = update.message
-        else:
+        message = update.effective_message if update else None
+        if not message:
             log.error("Pas de message pour déclencher l'achat en attente")
             return False
         await proposer_choix_achat(message, ctx, annonce_id, uid)
@@ -240,17 +231,10 @@ async def traiter_achat_en_attente(ctx, update, uid):
     except Exception as e:
         log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
         try:
-            if isinstance(update, Update) and update.effective_message:
-                target = update.effective_message
-            elif hasattr(update, 'message') and update.message:
-                target = update.message
-            else:
-                target = None
-            if target:
-                await target.reply_text(
-                    "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-                )
+            await update.effective_message.reply_text(
+                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+            )
         except Exception:
             pass
         return True
@@ -712,6 +696,8 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await handle_members_page(query, ctx, uid, u, parts)
         elif prefix == "memberinfo":
             await handle_member_info(query, uid, parts)
+        elif prefix == "rappelannonce":
+            await handle_rappel_annonce(query, uid, parts)
     except Exception as e:
         log.error(f"Erreur callback '{data}' : {e}\n{traceback.format_exc()}")
         try:
@@ -1349,12 +1335,45 @@ async def handle_admin_action(query, ctx, uid, parts):
         await handle_members_page(query, ctx, uid, u, ["memberspage", "0"])
         return
 
+    if act == "supprimer_annonce":
+        # Suppression par l'admin
+        ann_id = parts[2]
+        oid = try_objectid(ann_id)
+        if not oid:
+            await query.answer("ID invalide.")
+            return
+        annonce = db.annonces.find_one({"_id": oid})
+        if not annonce:
+            await query.answer("Annonce introuvable.")
+            return
+        # Supprimer le message du canal si présent
+        chat_id = annonce.get("canal_chat_id")
+        msg_id = annonce.get("canal_message_id")
+        if chat_id and msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                log.warning(f"Échec suppression message canal: {e}")
+        db.annonces.delete_one({"_id": oid})
+        log_audit("ANNONCE_SUPPRIMEE_ADMIN", str(ann_id), uid)
+        try:
+            await ctx.bot.send_message(annonce["vendeur_id"], f"🗑️ Votre annonce '{annonce.get('categorie','')}' a été supprimée par l'équipe.")
+        except Exception as e:
+            log.warning(f"Notification vendeur suppression: {e}")
+        await query.message.edit_text("🗑️ Annonce supprimée.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]]))
+        return
+
     if act == "voir_attente":
         items = list(db.annonces.find({"statut": "en_attente"}).limit(10))
         if not items:
             await safe_edit(query, "✅ Aucune annonce en attente.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
-        kb = [[InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modact:approuve:{it['_id']}"),
-               InlineKeyboardButton("❌", callback_data=f"modact:rejete:{it['_id']}")] for it in items]
+        kb = []
+        for it in items:
+            kb.append([
+                InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modact:approuve:{it['_id']}"),
+                InlineKeyboardButton("❌", callback_data=f"modact:rejete:{it['_id']}"),
+                InlineKeyboardButton("🗑️", callback_data=f"admact:supprimer_annonce:{it['_id']}")
+            ])
         kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
         await safe_edit(query, f"📋 {len(items)} en attente", InlineKeyboardMarkup(kb))
 
@@ -1362,8 +1381,13 @@ async def handle_admin_action(query, ctx, uid, parts):
         items = list(db.annonces.find({"modification_en_attente": True}).limit(10))
         if not items:
             await safe_edit(query, "✅ Aucune modification en attente.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
-        kb = [[InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modifact:approuver:{it['_id']}"),
-               InlineKeyboardButton("❌", callback_data=f"modifact:refuser:{it['_id']}")] for it in items]
+        kb = []
+        for it in items:
+            kb.append([
+                InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modifact:approuver:{it['_id']}"),
+                InlineKeyboardButton("❌", callback_data=f"modifact:refuser:{it['_id']}"),
+                InlineKeyboardButton("🗑️", callback_data=f"admact:supprimer_annonce:{it['_id']}")
+            ])
         kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
         await safe_edit(query, f"✏️ {len(items)} modification(s)", InlineKeyboardMarkup(kb))
 
@@ -1490,6 +1514,89 @@ async def handle_admin_action(query, ctx, uid, parts):
             await ctx.bot.send_document(uid, document=InputFile(buffer, filename=f"rapport_{fmt_date()}.txt"), caption="📊 Rapport exporté.")
         except Exception as e:
             log.error(f"Échec export : {e}")
+
+# ══════════════════════════════════════════════════════════════
+#  RAPPEL AUTOMATIQUE DE VALIDITÉ DES ANNONCES
+# ══════════════════════════════════════════════════════════════
+
+async def handle_rappel_annonce(query, uid, parts):
+    """Callback quand le vendeur clique sur 'Toujours valable'."""
+    annonce_id = parts[2]
+    oid = try_objectid(annonce_id)
+    if not oid:
+        await query.answer("Annonce invalide.")
+        return
+    annonce = db.annonces.find_one({"_id": oid})
+    if not annonce or annonce["vendeur_id"] != uid:
+        await query.answer("Ce n'est pas votre annonce.")
+        return
+    # Mettre à jour la date de dernier rappel
+    db.annonces.update_one({"_id": oid}, {"$set": {"dernier_rappel": time.time()}})
+    await query.answer("✅ Merci d'avoir confirmé ! Votre annonce reste active.")
+    await query.message.edit_text("✅ Votre annonce a bien été confirmée comme toujours d'actualité.")
+
+async def job_rappel_annonces(ctx: ContextTypes.DEFAULT_TYPE):
+    """Tâche planifiée : vérifie les annonces à rappeler ou à désactiver."""
+    maintenant = time.time()
+    cfg = get_config()
+    delai_rappel = cfg.get("delai_rappel_annonce_jours", 30) * 86400
+    delai_inactivite = cfg.get("delai_inactivite_annonce_jours", 3) * 86400
+
+    # 1. Envoyer un rappel aux annonces approuvées dont le dernier rappel est plus vieux que delai_rappel
+    seuil_rappel = maintenant - delai_rappel
+    annonces_a_rappeler = db.annonces.find({
+        "statut": "approuve",
+        "$or": [
+            {"dernier_rappel": {"$lt": seuil_rappel}},
+            {"dernier_rappel": {"$exists": False}}
+        ]
+    })
+    for ann in annonces_a_rappeler:
+        # Vérifier si un rappel a déjà été envoyé récemment
+        dernier_rappel = ann.get("dernier_rappel", 0)
+        if dernier_rappel and (maintenant - dernier_rappel) < delai_rappel:
+            continue
+        vendeur_id = ann["vendeur_id"]
+        try:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Toujours valable", callback_data=f"rappelannonce:confirmer:{ann['_id']}")
+            ]])
+            await ctx.bot.send_message(vendeur_id,
+                f"🔔 <b>Rappel : votre annonce est-elle toujours d'actualité ?</b>\n\n"
+                f"<b>{ann.get('categorie','')}</b> — {ann.get('prix','')} {ann.get('devise','')}\n\n"
+                f"Si oui, cliquez sur le bouton ci-dessous. Sans réponse d'ici {delai_inactivite//86400} jours, l'annonce sera désactivée.",
+                parse_mode="HTML", reply_markup=kb)
+            # Marquer le rappel pour éviter de renvoyer tout de suite
+            db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"dernier_rappel": maintenant}})
+        except Exception as e:
+            log.warning(f"Échec d'envoi du rappel pour l'annonce {ann['_id']}: {e}")
+
+    # 2. Désactiver les annonces qui n'ont pas répondu après le délai d'inactivité
+    seuil_desactivation = maintenant - delai_inactivite
+    annonces_a_desactiver = db.annonces.find({
+        "statut": "approuve",
+        "dernier_rappel": {"$lt": seuil_desactivation}
+    })
+    for ann in annonces_a_desactiver:
+        # Vérifier que le rappel a bien été envoyé (dernier_rappel existe et est assez ancien)
+        dernier_rappel = ann.get("dernier_rappel", 0)
+        if not dernier_rappel or (maintenant - dernier_rappel) < delai_inactivite:
+            continue
+        db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"statut": "expire"}})
+        # Supprimer le message du canal
+        chat_id = ann.get("canal_chat_id")
+        msg_id = ann.get("canal_message_id")
+        if chat_id and msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                log.warning(f"Échec suppression message canal expiré: {e}")
+        try:
+            await ctx.bot.send_message(ann["vendeur_id"],
+                f"⏰ Votre annonce '{ann.get('categorie','')}' a été automatiquement désactivée car vous n'avez pas confirmé sa validité à temps.")
+        except Exception as e:
+            log.warning(f"Notification désactivation: {e}")
+        log_audit("ANNONCE_EXPIREE_AUTO", str(ann["_id"]), 0)
 
 # ══════════════════════════════════════════════════════════════
 #  COMMANDE /alerte, /info (inchangé)
@@ -1638,7 +1745,7 @@ async def job_notif_tickets(ctx: ContextTypes.DEFAULT_TYPE):
                     log.warning(f"Échec rappel ticket pour {u['_id']}: {e}")
 
 # ══════════════════════════════════════════════════════════════
-#  POST INIT
+#  POST INIT / SHUTDOWN
 # ══════════════════════════════════════════════════════════════
 
 async def post_init(application: Application):
@@ -1648,6 +1755,10 @@ async def post_init(application: Application):
         log.warning(f"Suppression webhook : {e}")
     ton.demarrer_scanner(application.bot)
     log.info("✅ Bot Market Ultra v4.0 démarré — scanner TON actif.")
+
+async def post_shutdown(application: Application):
+    await ton.arreter_scanner()
+    log.info("Scanner TON arrêté proprement.")
 
 # ══════════════════════════════════════════════════════════════
 #  ROUTEUR MESSAGES FINAL
@@ -1674,7 +1785,7 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 # ══════════════════════════════════════════════════════════════
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("alerte", cmd_alerte))
@@ -1687,6 +1798,8 @@ def main():
         if TEAM_CHANNEL_ID:
             app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
         app.job_queue.run_repeating(job_notif_tickets, interval=86400, first=3600)
+        # Vérification des annonces à rappeler toutes les heures
+        app.job_queue.run_repeating(job_rappel_annonces, interval=3600, first=600)
 
     log.info("🚀 Lancement du polling Telegram...")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
