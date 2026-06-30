@@ -1,3 +1,4 @@
+# Fichier bot_market.py complet avec la correction de l'erreur CallbackQuery
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║         BOT MARKET ULTRA v4.0 — VERSION FINALE               ║
@@ -12,6 +13,7 @@ v4.6 – Corrections critiques + améliorations
 - Nouveau token intégré
 - Correction balise HTML invalide dans l'aide
 - Troncature CGU à 4000 caractères
+- Correction erreur 'CallbackQuery' object has no attribute 'effective_message'
 """
 
 import os
@@ -215,7 +217,7 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     return True
 
 # ══════════════════════════════════════════════════════════════
-#  GESTION DE L'ACHAT EN ATTENTE (stockage base)
+#  GESTION DE L'ACHAT EN ATTENTE (corrigée)
 # ══════════════════════════════════════════════════════════════
 
 async def traiter_achat_en_attente(ctx, update, uid):
@@ -225,8 +227,12 @@ async def traiter_achat_en_attente(ctx, update, uid):
     annonce_id = doc["annonce_id"]
     db.achat_attente.delete_one({"user_id": uid})
     try:
-        message = update.effective_message if update else None
-        if not message:
+        # Déterminer le message selon le type d'update
+        if isinstance(update, Update) and update.effective_message:
+            message = update.effective_message
+        elif hasattr(update, 'message') and update.message:
+            message = update.message
+        else:
             log.error("Pas de message pour déclencher l'achat en attente")
             return False
         await proposer_choix_achat(message, ctx, annonce_id, uid)
@@ -234,10 +240,17 @@ async def traiter_achat_en_attente(ctx, update, uid):
     except Exception as e:
         log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
         try:
-            await update.effective_message.reply_text(
-                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-            )
+            if isinstance(update, Update) and update.effective_message:
+                target = update.effective_message
+            elif hasattr(update, 'message') and update.message:
+                target = update.message
+            else:
+                target = None
+            if target:
+                await target.reply_text(
+                    "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+                )
         except Exception:
             pass
         return True
@@ -754,7 +767,6 @@ async def handle_nav(query, ctx, uid, u, parts):
 
     if cible == "cgu":
         cgu_texte = cfg.get('cgu_text','')
-        # Limiter à 4000 caractères pour laisser la place aux balises HTML
         if len(cgu_texte) > 4000:
             cgu_texte = cgu_texte[:4000] + "...\n\n(texte complet dans le message original)"
         kb_rows = []
