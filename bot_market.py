@@ -39,7 +39,6 @@ import traceback
 import threading
 import datetime
 import re
-import asyncio
 from flask import Flask
 from pymongo import MongoClient
 from bson.objectid import ObjectId
@@ -118,7 +117,7 @@ ROLE_LEVEL = {"membre": 0, "gerant": 1, "admin": 2, "superadmin": 3}
 ROLE_LABEL = {"membre": "👤 Membre", "gerant": "🛡️ Gérant", "admin": "⚙️ Admin", "superadmin": "⚡ FONDATEUR"}
 
 # ──────────── Rate limiting callbacks ────────────
-_callback_timestamps = {}  # user_id -> list of timestamps
+_callback_timestamps = {}
 MAX_CALLBACKS_PER_SEC = 4
 
 def check_callback_rate(user_id: int) -> bool:
@@ -224,18 +223,21 @@ def build_main_menu(uid, u, cfg) -> list:
 
 async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     if message is None:
-        message = update.effective_message
+        message = update.effective_message if update else None
+    if not message:
+        return
     cfg = get_config()
+    u = u or get_user(uid)
     txt = (
         f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.0</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
-        f"💰 Points : <code>{u.get('points',0) if u else get_user(uid).get('points',0)}</code>\n"
+        f"💰 Points : <code>{u.get('points',0)}</code>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"💡 <i>Faites votre choix via le tableau de bord :</i>"
     )
-    kb = InlineKeyboardMarkup(build_main_menu(uid, u or get_user(uid), cfg))
+    kb = InlineKeyboardMarkup(build_main_menu(uid, u, cfg))
     await message.reply_text(txt, reply_markup=kb, parse_mode="HTML")
 
 async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
@@ -309,7 +311,6 @@ LIMITES = {
 }
 
 def nettoyer_prix(texte):
-    # Garde uniquement chiffres et point, limite 20 caractères
     nettoye = ''.join(c for c in texte if c.isdigit() or c == '.')
     return nettoye[:20]
 
@@ -421,7 +422,8 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
         save_user(uid, {"state": "IDLE"})
         escaped_text = re.escape(text)
         res = list(db.annonces.find({"statut": "approuve",
-            "$or": [{"categorie": {"$regex": escaped_text, "$options": "i"}}, {"description": {"$regex": escaped_text, "$options": "i"}}]}))
+            "$or": [{"categorie": {"$regex": escaped_text, "$options": "i"}},
+                    {"description": {"$regex": escaped_text, "$options": "i"}}]}))
         kb = [[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
         if not res:
             await update.message.reply_text("🔍 Aucun résultat.", reply_markup=InlineKeyboardMarkup(kb))
@@ -839,6 +841,7 @@ async def handle_moderation(query, ctx, parts):
             update_fields["canal_message_id"] = msg_sent.message_id
         db.annonces.update_one({"_id": oid}, {"$set": update_fields})
         log_audit("ANNONCE_APPROUVEE", str(oid), query.from_user.id)
+
         # Incrémente filleuls qualifiés du parrain si vendeur a un parrain
         parrain = v.get("parrain")
         if parrain and parrain != item["vendeur_id"]:
@@ -848,7 +851,6 @@ async def handle_moderation(query, ctx, parts):
                 return_document=True
             )
             if filleuls_qualifies and filleuls_qualifies.get("filleuls_qualifies", 0) % 5 == 0:
-                # Attribution d'un ticket sans commission
                 ticket = {
                     "id": str(ObjectId()),
                     "expiration": time.time() + 30*86400,
@@ -876,11 +878,487 @@ async def handle_moderation(query, ctx, parts):
             except Exception as e: log.warning(f"Notification refus vendeur: {e}")
         await safe_edit(query, "❌ Annonce rejetée.")
 
-# Suite inchangée pour les autres fonctions de gestion...
-# (handle_modification_annonce, handle_view_annonce, handle_achat_choice, etc.)
-# Je les garde telles quelles mais en appliquant les logs warning sur les except: pass.
+# ──────────────── MODIFICATION D'ANNONCE ────────────────
 
-# Pour économiser la réponse, je ne réécris pas toutes les fonctions, elles restent identiques
-# avec juste les except: pass transformés en log.warning.
+async def handle_modification_annonce(query, ctx, parts):
+    if not has_level(query.from_user.id, get_user(query.from_user.id), "gerant"):
+        await query.answer("🚫 Réservé à l'équipe.", show_alert=True)
+        return
+    act, id_a = parts[1], parts[2]
+    oid = try_objectid(id_a)
+    item = db.annonces.find_one({"_id": oid}) if oid else None
+    if not item: return
 
-# En fin de fichier, le lancement reste inchangé.
+    if act == "approuver":
+        db.annonces.update_one({"_id": oid}, {"$set": {
+            "description": item.get("nouvelle_description", item.get("description")),
+            "prix": item.get("nouveau_prix", item.get("prix")),
+            "modification_en_attente": False
+        }})
+        updated = db.annonces.find_one({"_id": oid})
+        chat_id, msg_id = updated.get("canal_chat_id"), updated.get("canal_message_id")
+        if chat_id and msg_id:
+            bot_username = (await ctx.bot.get_me()).username
+            txt_pub = (
+                f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(updated.get('categorie','').replace(' ', '_'))}\n"
+                f"📱 <code>{safe_html(updated.get('plateforme'))}</code>\n💰 <b>{safe_html(updated.get('prix'))} {safe_html(updated.get('devise'))}</b>\n"
+                f"📝 {safe_html(updated.get('description',''))}"
+            )
+            try:
+                if updated.get("photos"):
+                    await ctx.bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=txt_pub, parse_mode="HTML")
+                else:
+                    await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=txt_pub, parse_mode="HTML")
+            except Exception as e:
+                log.warning(f"Échec édition canal : {e}")
+        log_audit("MODIF_ANNONCE_APPROUVEE", str(oid), query.from_user.id)
+        try: await ctx.bot.send_message(item["vendeur_id"], "✅ Ta modification a été approuvée et publiée !")
+        except Exception as e: log.warning(f"Notification modif vendeur: {e}")
+        await safe_edit(query, "✅ Modification approuvée et appliquée.")
+    else:
+        db.annonces.update_one({"_id": oid}, {"$set": {"modification_en_attente": False}, "$unset": {"nouvelle_description": "", "nouveau_prix": ""}})
+        log_audit("MODIF_ANNONCE_REFUSEE", str(oid), query.from_user.id)
+        try: await ctx.bot.send_message(item["vendeur_id"], "❌ Ta modification a été refusée. L'ancienne version reste active.")
+        except Exception as e: log.warning(f"Notification refus modif vendeur: {e}")
+        await safe_edit(query, "❌ Modification refusée.")
+
+# ──────────────── VUE ANNONCE ────────────────
+
+async def handle_view_annonce(query, ctx, parts):
+    action, id_a = parts[1], parts[2]
+    oid = try_objectid(id_a)
+    if not oid:
+        await query.answer("❌ Invalide.", show_alert=True); return
+    item = db.annonces.find_one({"_id": oid})
+    if not item:
+        await query.answer("❌ Introuvable.", show_alert=True); return
+
+    if action == "suppr":
+        if item.get("vendeur_id") != query.from_user.id:
+            await query.answer("🚫 Pas ton annonce.", show_alert=True); return
+        db.annonces.delete_one({"_id": oid})
+        await safe_edit(query, "🗑️ Supprimée.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
+        return
+
+    if action == "modifier":
+        if item.get("vendeur_id") != query.from_user.id:
+            await query.answer("🚫 Pas ton annonce.", show_alert=True); return
+        ctx.user_data["modif_ann_id"] = str(oid)
+        save_user(query.from_user.id, {"state": "MODIF_DESC"})
+        await safe_edit(query, "✏️ Nouvelle description :")
+        return
+
+    bot_username = (await ctx.bot.get_me()).username
+    txt = f"🎮 <b>{safe_html(item.get('categorie'))}</b>\n\nPrix : {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n{safe_html(item.get('description',''))}"
+    kb = [[InlineKeyboardButton("🤝 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")]]
+    try:
+        if item.get("photos"):
+            await ctx.bot.send_photo(query.from_user.id, item["photos"][0], caption=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        else:
+            await ctx.bot.send_message(query.from_user.id, txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    except Exception as e:
+        log.error(f"Échec affichage : {e}")
+
+# ──────────────── CHOIX ACHAT DIRECT / ESCROW ────────────────
+
+async def proposer_choix_achat(message, ctx, id_ann, uid):
+    oid = try_objectid(id_ann)
+    if not oid:
+        await message.reply_text("❌ Lien invalide."); return
+    ann = db.annonces.find_one({"_id": oid})
+    if not ann or ann.get("statut") != "approuve":
+        await message.reply_text("❌ Annonce indisponible."); return
+    if ann.get("vendeur_id") == uid:
+        await message.reply_text("⚠️ Tu ne peux pas acheter ta propre annonce."); return
+
+    kb = [[
+        InlineKeyboardButton("🤝 Direct (sans frais)", callback_data=f"achatchoice:direct:{oid}"),
+        InlineKeyboardButton("🔒 Escrow sécurisé", callback_data=f"achatchoice:escrow:{oid}")
+    ]]
+    await message.reply_text(
+        f"🛒 <b>{safe_html(ann.get('categorie'))}</b>\n💰 {safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}\n\n"
+        f"Comment veux-tu procéder ?\n\n"
+        f"🤝 <b>Direct</b> : tu négocies seul avec le vendeur, aucune protection.\n"
+        f"🔒 <b>Escrow</b> : le bot bloque les fonds jusqu'à confirmation, plus sûr (petite commission).",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+async def handle_achat_choice(query, ctx, uid, parts):
+    mode, id_ann = parts[1], parts[2]
+    oid = try_objectid(id_ann)
+    ann = db.annonces.find_one({"_id": oid})
+    if not ann: return
+
+    if mode == "direct":
+        trx_id = db.transactions_directes.insert_one({
+            "ann_id": oid, "vendeur_id": ann["vendeur_id"], "acheteur_id": uid,
+            "statut": "en_cours", "date_creation": time.time()
+        }).inserted_id
+        v = get_user(ann["vendeur_id"])
+        kb_switch = [[InlineKeyboardButton("🔄 Passer en Escrow", callback_data=f"achatchoice:passer_escrow:{trx_id}")]]
+        try:
+            await ctx.bot.send_message(ann["vendeur_id"],
+                f"🤝 Un acheteur (@{query.from_user.username or uid}) veut ton annonce <b>{safe_html(ann.get('categorie'))}</b> en mode direct.\nContacte-le directement.",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_switch))
+        except Exception as e:
+            log.warning(f"Notification direct vendeur: {e}")
+        await safe_edit(query, f"🤝 Mise en relation faite avec @{safe_html(v.get('username'))}. Vous pouvez négocier directement.",
+                        InlineKeyboardMarkup(kb_switch))
+
+    elif mode == "escrow":
+        escrow_id = await ton.initier_escrow(ctx.bot, ann, uid, query.from_user.username or str(uid))
+        if escrow_id:
+            await query.message.reply_text("🔒 Procédure Escrow lancée, regarde le message reçu.")
+
+    elif mode == "passer_escrow":
+        trx_id = id_ann
+        trx = db.transactions_directes.find_one({"_id": try_objectid(trx_id)})
+        if not trx: return
+        ann2 = db.annonces.find_one({"_id": trx["ann_id"]})
+        escrow_id = await ton.initier_escrow(ctx.bot, ann2, trx["acheteur_id"], "acheteur")
+        if escrow_id:
+            await ctx.bot.send_message(trx["acheteur_id"], "🔒 Le vendeur (ou toi) a basculé en mode Escrow sécurisé. Regarde le message reçu.")
+
+# ──────────────── LITIGES (admin) ────────────────
+
+async def handle_litige_action(query, ctx, uid, parts):
+    if not has_level(uid, get_user(uid), "gerant"):
+        await query.answer("🚫 Réservé à l'équipe.", show_alert=True); return
+    act, lit_id = parts[1], parts[2]
+    oid = try_objectid(lit_id)
+    lit = db.litiges.find_one({"_id": oid}) if oid else None
+    if not lit: return
+
+    if lit.get("demandeur_id") == uid:
+        await query.answer("🚫 Tu ne peux pas traiter ton propre litige.", show_alert=True); return
+
+    if act in ("faveur_ach", "faveur_ven"):
+        faveur = "acheteur" if act == "faveur_ach" else "vendeur"
+        db.litiges.update_one({"_id": oid}, {"$set": {"statut": "resolu", "faveur": faveur, "resolu_par": uid, "date_cloture": time.time()}})
+        log_audit("LITIGE_RESOLU", f"{oid} en faveur {faveur}", uid)
+        await safe_edit(query, f"✅ Litige résolu en faveur {faveur}.")
+        try: await ctx.bot.send_message(lit["demandeur_id"], f"⚖️ Ton litige a été résolu (en faveur : {faveur}).")
+        except Exception as e: log.warning(f"Notification résolution litige: {e}")
+    elif act == "sanction":
+        db.litiges.update_one({"_id": oid}, {"$set": {"statut": "resolu", "sanction": True, "resolu_par": uid, "date_cloture": time.time()}})
+        log_audit("SANCTION_APPLIQUEE", str(oid), uid)
+        await safe_edit(query, "🚫 Sanction enregistrée.")
+
+# ──────────────── CANDIDATURES ────────────────
+
+async def handle_candidature_action(query, ctx, uid, parts):
+    if uid != SUPER_ADMIN_ID:
+        await query.answer("🚫 Réservé au Fondateur.", show_alert=True); return
+    act, cand_id = parts[1], parts[2]
+    oid = try_objectid(cand_id)
+    cand = db.candidatures.find_one({"_id": oid}) if oid else None
+    if not cand: return
+
+    if act == "accepter":
+        save_user(cand["user_id"], {"role": "gerant"})
+        db.candidatures.update_one({"_id": oid}, {"$set": {"statut": "acceptee"}})
+        log_audit("CANDIDATURE_ACCEPTEE", str(cand["user_id"]), uid)
+        try: await ctx.bot.send_message(cand["user_id"], "🎉 Félicitations, tu es maintenant Gérant ! Tape /start.")
+        except Exception as e: log.warning(f"Notification candidat: {e}")
+        await safe_edit(query, "✅ Candidature acceptée, rôle Gérant attribué.")
+    else:
+        db.candidatures.update_one({"_id": oid}, {"$set": {"statut": "refusee"}})
+        try: await ctx.bot.send_message(cand["user_id"], "❌ Ta candidature n'a pas été retenue cette fois.")
+        except Exception as e: log.warning(f"Notification refus candidat: {e}")
+        await safe_edit(query, "❌ Candidature refusée.")
+
+# ──────────────── RÔLES & BLACKLIST (admin) ────────────────
+
+async def handle_role_action(query, ctx, uid, parts):
+    if uid != SUPER_ADMIN_ID:
+        await query.answer("🚫 Réservé au Fondateur.", show_alert=True); return
+    act = parts[1]
+    if act == "promouvoir_admin":
+        target = int(parts[2])
+        save_user(target, {"role": "admin"})
+        log_audit("PROMOTION_ADMIN", str(target), uid)
+        await query.message.reply_text(f"✅ {target} promu Admin.")
+    elif act == "retrograder":
+        target = int(parts[2])
+        save_user(target, {"role": "membre"})
+        log_audit("RETROGRADATION", str(target), uid)
+        await query.message.reply_text(f"✅ {target} rétrogradé Membre.")
+
+async def handle_blacklist_action(query, ctx, uid, parts):
+    if not has_level(uid, get_user(uid), "admin"):
+        await query.answer("🚫 Réservé à l'équipe (Admin+).", show_alert=True); return
+    act = parts[1]
+    if act == "retirer":
+        target = int(parts[2])
+        db.blacklist.delete_one({"user_id": target})
+        log_audit("BLACKLIST_RETIRE", str(target), uid)
+        await query.message.reply_text(f"✅ {target} retiré de la blacklist.")
+
+# ──────────────── ADMIN ────────────────
+
+async def handle_admin_action(query, ctx, uid, parts):
+    u = get_user(uid)
+    if not has_level(uid, u, "gerant"):
+        await query.answer("🚫 Réservé à l'équipe.", show_alert=True); return
+    act = parts[1]
+    cfg = get_config()
+
+    if act == "voir_attente":
+        items = list(db.annonces.find({"statut": "en_attente"}).limit(10))
+        if not items:
+            await safe_edit(query, "✅ Aucune annonce en attente.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
+        kb = [[InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modact:approuve:{it['_id']}"),
+               InlineKeyboardButton("❌", callback_data=f"modact:rejete:{it['_id']}")] for it in items]
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, f"📋 {len(items)} en attente", InlineKeyboardMarkup(kb))
+
+    elif act == "voir_modifs":
+        items = list(db.annonces.find({"modification_en_attente": True}).limit(10))
+        if not items:
+            await safe_edit(query, "✅ Aucune modification en attente.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
+        kb = [[InlineKeyboardButton(f"✅ {it.get('categorie','?')[:15]}", callback_data=f"modifact:approuver:{it['_id']}"),
+               InlineKeyboardButton("❌", callback_data=f"modifact:refuser:{it['_id']}")] for it in items]
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, f"✏️ {len(items)} modification(s)", InlineKeyboardMarkup(kb))
+
+    elif act == "voir_litiges":
+        items = list(db.litiges.find({"statut": "ouvert"}).limit(10))
+        if not items:
+            await safe_edit(query, "✅ Aucun litige ouvert.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
+        txt = f"⚖️ {len(items)} litige(s)\n\n"
+        kb = []
+        for it in items:
+            txt += f"🆔 {it['_id']} — <code>{it.get('demandeur_id')}</code>\n"
+            kb.append([InlineKeyboardButton("✅→Ach", callback_data=f"litact:faveur_ach:{it['_id']}"),
+                       InlineKeyboardButton("✅→Ven", callback_data=f"litact:faveur_ven:{it['_id']}"),
+                       InlineKeyboardButton("🚫", callback_data=f"litact:sanction:{it['_id']}")])
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "voir_candidatures":
+        items = list(db.candidatures.find({"statut": "en_attente"}).limit(10))
+        if not items:
+            await safe_edit(query, "✅ Aucune candidature.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
+        txt = f"🎯 {len(items)} candidature(s)\n\n"
+        kb = []
+        for it in items:
+            txt += f"👤 @{safe_html(it.get('username'))} — {safe_html(it.get('motif',''))[:60]}\n\n"
+            kb.append([InlineKeyboardButton("✅", callback_data=f"candidact:accepter:{it['_id']}"),
+                       InlineKeyboardButton("❌", callback_data=f"candidact:refuser:{it['_id']}")])
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "gerer_blacklist":
+        if not has_level(uid, u, "admin"):
+            await query.answer("🚫 Réservé Admin+.", show_alert=True); return
+        bl = list(db.blacklist.find({}).limit(10))
+        txt = f"🚫 Blacklist ({len(bl)})\n\n"
+        kb = []
+        for b in bl:
+            txt += f"• <code>{b['user_id']}</code> — {safe_html(b.get('raison',''))}\n"
+            kb.append([InlineKeyboardButton(f"➖ Retirer {b['user_id']}", callback_data=f"blact:retirer:{b['user_id']}")])
+        kb.append([InlineKeyboardButton("➕ Ajouter (tape l'ID puis la raison)", callback_data="admact:ajouter_bl")])
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "ajouter_bl":
+        save_user(uid, {"state": "ADMIN_BL_ID"})
+        await safe_edit(query, "🚫 Tape l'ID Telegram à blacklister :")
+
+    elif act == "gerer_roles":
+        if uid != SUPER_ADMIN_ID:
+            await query.answer("🚫 Superadmin uniquement.", show_alert=True); return
+        save_user(uid, {"state": "ADMIN_ROLE_ID"})
+        await safe_edit(query, "👥 Tape l'ID Telegram à promouvoir Admin :")
+
+    elif act == "toggle_rec":
+        if uid != SUPER_ADMIN_ID: return
+        db.config.update_one({"type": "global"}, {"$set": {"recrutement_ouvert": not cfg.get("recrutement_ouvert", False)}})
+        log_audit("TOGGLE_RECRUTEMENT", "", uid)
+        await afficher_admin_root(query, ctx, uid, u)
+
+    elif act == "toggle_urg":
+        if uid != SUPER_ADMIN_ID: return
+        db.config.update_one({"type": "global"}, {"$set": {"mode_urgence": not cfg.get("mode_urgence", False)}})
+        log_audit("TOGGLE_URGENCE", "", uid)
+        await afficher_admin_root(query, ctx, uid, u)
+
+    elif act == "config":
+        if uid != SUPER_ADMIN_ID: return
+        kb = [
+            [InlineKeyboardButton(f"📋 Limite annonces ({cfg.get('limite_annonces_membre')})", callback_data="admact:set_limite")],
+            [InlineKeyboardButton(f"⏱️ Délai anti-arnaque ({cfg.get('delai_anti_arnaque')}s)", callback_data="admact:set_delai")],
+            [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
+        ]
+        await safe_edit(query, "⚙️ <b>Configuration générale</b>", InlineKeyboardMarkup(kb))
+
+    elif act == "set_limite":
+        save_user(uid, {"state": "ADMCFG_LIMITE"})
+        await safe_edit(query, "📋 Nouvelle limite d'annonces par membre :")
+
+    elif act == "set_delai":
+        save_user(uid, {"state": "ADMCFG_DELAI"})
+        await safe_edit(query, "⏱️ Nouveau délai anti-arnaque en secondes :")
+
+    elif act == "config_ton":
+        if uid != SUPER_ADMIN_ID: return
+        kb = [
+            [InlineKeyboardButton(f"💼 Commission ({cfg.get('commission_pct')}%)", callback_data="admact:set_commission")],
+            [InlineKeyboardButton(f"🔐 Seuil double validation ({cfg.get('seuil_double_validation_ton')} TON)", callback_data="admact:set_seuil")],
+            [InlineKeyboardButton("🏦 Wallet TON admin", callback_data="admact:set_wallet")],
+            [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
+        ]
+        await safe_edit(query, "💰 <b>Configuration TON</b>", InlineKeyboardMarkup(kb))
+
+    elif act == "set_commission":
+        save_user(uid, {"state": "ADMCFG_COMMISSION"})
+        await safe_edit(query, "💼 Nouvelle commission en % (ex: 5) :")
+
+    elif act == "set_seuil":
+        save_user(uid, {"state": "ADMCFG_SEUIL"})
+        await safe_edit(query, "🔐 Nouveau seuil de double validation en TON :")
+
+    elif act == "set_wallet":
+        save_user(uid, {"state": "ADMCFG_WALLET"})
+        await safe_edit(query, "🏦 Adresse wallet TON pour recevoir la commission :")
+
+    elif act == "audit_log":
+        if uid != SUPER_ADMIN_ID: return
+        logs = list(db.audit_logs.find({}).sort("timestamp", -1).limit(15))
+        txt = "📜 <b>Audit Log (15 dernières actions)</b>\n\n"
+        for l in logs:
+            txt += f"🕐 {l.get('date')} — {l.get('action')} par <code>{l.get('acted_by')}</code>\n{safe_html(l.get('details',''))[:60]}\n\n"
+        await safe_edit(query, txt or "Aucune action.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]]))
+
+    elif act == "export_pdf":
+        buffer = io.BytesIO()
+        nb_vendu = db.annonces.count_documents({"statut": "vendu"})
+        nb_users = db.users.count_documents({})
+        nb_rejete = db.annonces.count_documents({"statut": "rejete"})
+        nb_litiges = db.litiges.count_documents({})
+        buffer.write(
+            f"RAPPORT BOT MARKET — {fmt_date()}\n================================\n"
+            f"Membres : {nb_users}\nVentes validées : {nb_vendu}\nAnnonces refusées : {nb_rejete}\nLitiges (total) : {nb_litiges}\n".encode())
+        buffer.seek(0)
+        try:
+            await ctx.bot.send_document(uid, document=InputFile(buffer, filename=f"rapport_{fmt_date()}.txt"), caption="📊 Rapport exporté.")
+        except Exception as e:
+            log.error(f"Échec export : {e}")
+
+# ══════════════════════════════════════════════════════════════
+#  COMMANDE /alerte
+# ══════════════════════════════════════════════════════════════
+
+async def cmd_alerte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not ctx.args:
+        await update.message.reply_text("🔔 Format : /alerte [jeu]"); return
+    jeu = " ".join(ctx.args)
+    db.alertes.update_one({"user_id": uid}, {"$addToSet": {"jeux": jeu}}, upsert=True)
+    await update.message.reply_text(f"🔔 Alerte activée pour : <b>{safe_html(jeu)}</b>", parse_mode="HTML")
+
+# ══════════════════════════════════════════════════════════════
+#  HANDLER MESSAGES — états admin spécifiques (blacklist/rôles)
+# ══════════════════════════════════════════════════════════════
+
+async def handle_admin_states(update, ctx, uid, state, text):
+    if state == "ADMIN_BL_ID":
+        try:
+            target = int(text)
+            ctx.user_data["bl_target"] = target
+            save_user(uid, {"state": "ADMIN_BL_RAISON"})
+            await update.message.reply_text("📋 Raison du blacklist :")
+        except Exception:
+            await update.message.reply_text("⚠️ ID invalide.")
+        return True
+    if state == "ADMIN_BL_RAISON":
+        target = ctx.user_data.get("bl_target")
+        db.blacklist.insert_one({"user_id": target, "raison": text, "date": fmt_date(), "admin_id": uid})
+        log_audit("BLACKLIST_AJOUT", f"{target} — {text}", uid)
+        save_user(uid, {"state": "IDLE"})
+        await update.message.reply_text(f"🚫 {target} blacklisté.")
+        try: await ctx.bot.send_message(target, "🚫 Tu as été blacklisté du Marketplace.")
+        except Exception as e: log.warning(f"Notification blacklist: {e}")
+        return True
+    if state == "ADMIN_ROLE_ID":
+        try:
+            target = int(text)
+            save_user(target, {"role": "admin"})
+            log_audit("PROMOTION_ADMIN", str(target), uid)
+            save_user(uid, {"state": "IDLE"})
+            await update.message.reply_text(f"✅ {target} promu Admin.")
+            try: await ctx.bot.send_message(target, "🎉 Tu es maintenant Admin du Marketplace !")
+            except Exception as e: log.warning(f"Notification promo: {e}")
+        except Exception:
+            await update.message.reply_text("⚠️ ID invalide.")
+        return True
+    return False
+
+# ══════════════════════════════════════════════════════════════
+#  GESTIONNAIRE D'ERREURS GLOBAL
+# ══════════════════════════════════════════════════════════════
+
+async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    log.error("Exception non gérée :", exc_info=ctx.error)
+    try:
+        await ctx.bot.send_message(SUPER_ADMIN_ID, f"🐛 <b>Erreur bot</b> :\n<code>{safe_html(str(ctx.error))[:500]}</code>", parse_mode="HTML")
+    except Exception as e:
+        log.warning(f"Notification erreur superadmin: {e}")
+
+# ══════════════════════════════════════════════════════════════
+#  TÂCHE PLANIFIÉE — résumé hebdo
+# ══════════════════════════════════════════════════════════════
+
+async def job_resume_hebdo(ctx: ContextTypes.DEFAULT_TYPE):
+    await ton.resume_hebdo_litiges(ctx.bot, TEAM_CHANNEL_ID)
+
+# ══════════════════════════════════════════════════════════════
+#  POST INIT
+# ══════════════════════════════════════════════════════════════
+
+async def post_init(application: Application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        log.warning(f"Suppression webhook : {e}")
+    ton.demarrer_scanner(application.bot)
+    log.info("✅ Bot Market Ultra v4.0 démarré — scanner TON actif.")
+
+# ══════════════════════════════════════════════════════════════
+#  ROUTEUR MESSAGES — point d'entrée final (états admin inclus)
+# ══════════════════════════════════════════════════════════════
+
+_original_handler = central_text_and_media_handler
+
+async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    u = get_user(uid)
+    state = u.get("state", "IDLE")
+    text = update.message.text if update.message else None
+
+    if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID") and text:
+        if await handle_admin_states(update, ctx, uid, state, text):
+            return
+
+    await _original_handler(update, ctx)
+
+# ══════════════════════════════════════════════════════════════
+#  LANCEMENT
+# ══════════════════════════════════════════════════════════════
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("alerte", cmd_alerte))
+    app.add_handler(CallbackQueryHandler(central_callback_router))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2))
+    app.add_error_handler(global_error_handler)
+
+    if app.job_queue and TEAM_CHANNEL_ID:
+        app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
+
+    log.info("🚀 Lancement du polling Telegram...")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
