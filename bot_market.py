@@ -4,14 +4,15 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.7 – Ajouts :
+v4.7 – Toutes les améliorations et corrections :
 - Suppression d'annonce par l'équipe (admin)
 - Rappel automatique de validité des annonces (30j / 3j)
 - Arrêt propre du scanner TON (post_shutdown)
 - Troncature automatique des messages trop longs dans safe_edit
-- Amélioration de la gestion d'erreur globale (trace complète envoyée)
+- Gestion d'erreur globale robuste (ignore None, trace complète)
 - Protection renforcée pour l'achat de sa propre annonce
 - Correction du blocage des nouveaux utilisateurs (CGU trop longues)
+- Correction du bouton "Passer en Escrow" (username, notifications)
 """
 
 import os
@@ -212,8 +213,7 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     if not u.get("cgu_acceptees", False):
         cfg = get_config()
         cgu_texte = cfg.get("cgu_text", "CGU non disponibles.")
-        # Tronquer pour éviter "Message is too long"
-        cgu_texte = truncate_text(cgu_texte, 3800)
+        cgu_texte = truncate_text(cgu_texte, 3800)  # Protection anti-dépassement
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]])
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -1083,7 +1083,7 @@ async def handle_view_annonce(query, ctx, parts):
     except Exception as e:
         log.error(f"Échec affichage : {e}")
 
-# ──────────────── CHOIX ACHAT (protection renforcée) ────────────────
+# ──────────────── CHOIX ACHAT (protection renforcée + correction passer_escrow) ────────────────
 
 async def proposer_choix_achat(message, ctx, id_ann, uid):
     try:
@@ -1145,13 +1145,24 @@ async def handle_achat_choice(query, ctx, uid, parts):
             await query.message.reply_text("🔒 Procédure Escrow lancée, regarde le message reçu.")
 
     elif mode == "passer_escrow":
-        trx_id = id_ann
+        trx_id = parts[2]
         trx = db.transactions_directes.find_one({"_id": try_objectid(trx_id)})
-        if not trx: return
+        if not trx:
+            await query.answer("❌ Transaction introuvable.", show_alert=True)
+            return
         ann2 = db.annonces.find_one({"_id": trx["ann_id"]})
-        escrow_id = await ton.initier_escrow(ctx.bot, ann2, trx["acheteur_id"], "acheteur")
+        if not ann2:
+            await query.answer("❌ Annonce introuvable.", show_alert=True)
+            return
+        acheteur = db.users.find_one({"_id": trx["acheteur_id"]})
+        acheteur_username = acheteur.get("username", str(trx["acheteur_id"])) if acheteur else str(trx["acheteur_id"])
+        escrow_id = await ton.initier_escrow(ctx.bot, ann2, trx["acheteur_id"], acheteur_username)
         if escrow_id:
-            await ctx.bot.send_message(trx["acheteur_id"], "🔒 Le vendeur (ou toi) a basculé en mode Escrow sécurisé. Regarde le message reçu.")
+            await ctx.bot.send_message(trx["acheteur_id"],
+                "🔒 Le vendeur a basculé la transaction en mode Escrow sécurisé. Regarde le message reçu pour payer.")
+            await query.message.edit_text(
+                "✅ Vous avez basculé la transaction en mode Escrow. L'acheteur va recevoir les instructions de paiement.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
 # ──────────────── LITIGES, CANDIDATURES, RÔLES, BLACKLIST, ADMIN (inchangé mais inclus) ────────────────
 
@@ -1725,9 +1736,12 @@ async def handle_admin_states(update, ctx, uid, state, text):
 # ══════════════════════════════════════════════════════════════
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.error is None:
+        log.warning("Signal d'erreur reçu sans exception.")
+        return
     tb_str = traceback.format_exc()
     log.error(f"Exception non gérée :\n{tb_str}")
-    safe_error = str(ctx.error) if ctx.error else "Erreur inconnue"
+    safe_error = str(ctx.error)
     for sensitive in [os.environ.get("TON_PRIVATE_KEY", ""), os.environ.get("MONGO_URI", ""),
                       os.environ.get("TONCENTER_API_KEY", ""), BOT_TOKEN]:
         if sensitive:
