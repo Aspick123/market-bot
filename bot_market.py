@@ -13,6 +13,7 @@ v4.7 – Toutes les améliorations et corrections :
 - Protection renforcée pour l'achat de sa propre annonce
 - Correction du blocage des nouveaux utilisateurs (CGU trop longues)
 - Correction du bouton "Passer en Escrow" (username, notifications)
+- Correction bouton Wallet TON pour les gérants (nouveau message + annuler)
 """
 
 import os
@@ -213,7 +214,7 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     if not u.get("cgu_acceptees", False):
         cfg = get_config()
         cgu_texte = cfg.get("cgu_text", "CGU non disponibles.")
-        cgu_texte = truncate_text(cgu_texte, 3800)  # Protection anti-dépassement
+        cgu_texte = truncate_text(cgu_texte, 3800)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📜 J'accepte les CGU", callback_data="nav:accepter_cgu")]])
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -721,7 +722,7 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             log.warning(f"Impossible de notifier l'erreur callback: {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  NAVIGATION (correction safe_edit pour help et cgu)
+#  NAVIGATION (correction safe_edit pour help et cgu, annulation wallet ton)
 # ══════════════════════════════════════════════════════════════
 
 async def handle_nav(query, ctx, uid, u, parts):
@@ -776,6 +777,14 @@ async def handle_nav(query, ctx, uid, u, parts):
         kb_rows.append([InlineKeyboardButton("🔙 Retour", callback_data="nav:retour")])
         await safe_edit(query, f"📜 <b>CONDITIONS GÉNÉRALES D'UTILISATION</b>\n\n{safe_html(cgu_texte)}",
                         reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
+        return
+
+    if cible == "annuler_ton_wallet":
+        # Annuler la saisie du wallet TON
+        ctx.user_data.pop("ton_state", None)
+        save_user(uid, {"state": "IDLE"})
+        await query.message.edit_text("❌ Saisie du wallet annulée.",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
         return
 
     # --- Les autres cibles (inchangées) ---
@@ -910,6 +919,22 @@ async def handle_nav(query, ctx, uid, u, parts):
             await query.answer("⚠️ Accès réservé à l'équipe.", show_alert=True)
             return
         await afficher_admin_root(query, ctx, uid, u)
+
+# ──────────────── SETPROF (wallet TON corrigé : nouveau message + bouton Annuler) ────────────────
+
+async def handle_setprof(query, ctx, uid, parts):
+    champ = parts[1]
+    if champ == "WALLET_TON":
+        ctx.user_data["ton_state"] = "saisir_wallet_ton"
+        # Envoie un nouveau message au lieu d'éditer l'existant
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_ton_wallet")]])
+        await query.message.reply_text(
+            "💼 Envoie ton adresse wallet TON (commence par EQ ou UQ) :",
+            reply_markup=kb)
+        # On ne modifie pas l'état du profil ici, on attend la saisie
+        return
+    save_user(uid, {"state": f"SETPROF_{champ}"})
+    await safe_edit(query, f"✍️ Nouvelle valeur pour : <b>{champ}</b>")
 
 # ──────────────── GESTION PHOTOS (fin_photos vérifie photo obligatoire) ────────────────
 
