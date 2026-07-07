@@ -14,6 +14,7 @@ v4.7 – Toutes les améliorations et corrections :
 - Correction du blocage des nouveaux utilisateurs (CGU trop longues)
 - Correction du bouton "Passer en Escrow" (username, notifications)
 - Correction bouton Wallet TON pour les gérants (nouveau message + annuler)
+- Correction robuste de 'traiter_achat_en_attente' pour CallbackQuery
 """
 
 import os
@@ -228,8 +229,16 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     return True
 
 # ══════════════════════════════════════════════════════════════
-#  GESTION DE L'ACHAT EN ATTENTE (stockage base)
+#  GESTION DE L'ACHAT EN ATTENTE (stockage base) — CORRIGÉE
 # ══════════════════════════════════════════════════════════════
+
+def _extraire_message(update):
+    """Retourne le message associé à l'update, qu'il s'agisse d'un Message classique ou d'un CallbackQuery."""
+    if isinstance(update, Update):
+        return update.effective_message
+    if hasattr(update, 'message') and update.message:
+        return update.message
+    return None
 
 async def traiter_achat_en_attente(ctx, update, uid):
     doc = db.achat_attente.find_one({"user_id": uid})
@@ -238,7 +247,7 @@ async def traiter_achat_en_attente(ctx, update, uid):
     annonce_id = doc["annonce_id"]
     db.achat_attente.delete_one({"user_id": uid})
     try:
-        message = update.effective_message if update else None
+        message = _extraire_message(update)
         if not message:
             log.error("Pas de message pour déclencher l'achat en attente")
             return False
@@ -246,13 +255,16 @@ async def traiter_achat_en_attente(ctx, update, uid):
         return True
     except Exception as e:
         log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
-        try:
-            await update.effective_message.reply_text(
-                "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
-            )
-        except Exception:
-            pass
+        # Tenter d'envoyer un message d'erreur si on a un message
+        msg_error = _extraire_message(update)
+        if msg_error:
+            try:
+                await msg_error.reply_text(
+                    "⚠️ Impossible d'afficher l'annonce demandée (erreur interne). Retour au menu.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]])
+                )
+            except Exception:
+                pass
         return True
 
 # ══════════════════════════════════════════════════════════════
@@ -780,7 +792,6 @@ async def handle_nav(query, ctx, uid, u, parts):
         return
 
     if cible == "annuler_ton_wallet":
-        # Annuler la saisie du wallet TON
         ctx.user_data.pop("ton_state", None)
         save_user(uid, {"state": "IDLE"})
         await query.message.edit_text("❌ Saisie du wallet annulée.",
@@ -926,12 +937,10 @@ async def handle_setprof(query, ctx, uid, parts):
     champ = parts[1]
     if champ == "WALLET_TON":
         ctx.user_data["ton_state"] = "saisir_wallet_ton"
-        # Envoie un nouveau message au lieu d'éditer l'existant
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_ton_wallet")]])
         await query.message.reply_text(
             "💼 Envoie ton adresse wallet TON (commence par EQ ou UQ) :",
             reply_markup=kb)
-        # On ne modifie pas l'état du profil ici, on attend la saisie
         return
     save_user(uid, {"state": f"SETPROF_{champ}"})
     await safe_edit(query, f"✍️ Nouvelle valeur pour : <b>{champ}</b>")
