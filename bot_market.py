@@ -4,17 +4,11 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.7 – Toutes les améliorations et corrections :
-- Suppression d'annonce par l'équipe (admin)
-- Rappel automatique de validité des annonces (30j / 3j)
-- Arrêt propre du scanner TON (post_shutdown)
-- Troncature automatique des messages trop longs dans safe_edit
-- Gestion d'erreur globale robuste (ignore None, trace complète)
-- Protection renforcée pour l'achat de sa propre annonce
-- Correction du blocage des nouveaux utilisateurs (CGU trop longues)
-- Correction du bouton "Passer en Escrow" (username, notifications)
-- Correction bouton Wallet TON pour les gérants (nouveau message + annuler)
-- Correction robuste de 'traiter_achat_en_attente' pour CallbackQuery
+v4.8 – Demande de compte avec modération
+- Nouveau bouton "📢 Demander un compte"
+- Tunnel de demande (jeu, plateforme, description)
+- Validation par l'équipe avant publication
+- Toutes les fonctionnalités antérieures conservées
 """
 
 import os
@@ -229,11 +223,10 @@ async def verifier_etapes_obligatoires(update, ctx, uid, u):
     return True
 
 # ══════════════════════════════════════════════════════════════
-#  GESTION DE L'ACHAT EN ATTENTE (stockage base) — CORRIGÉE
+#  GESTION DE L'ACHAT EN ATTENTE (stockage base)
 # ══════════════════════════════════════════════════════════════
 
 def _extraire_message(update):
-    """Retourne le message associé à l'update, qu'il s'agisse d'un Message classique ou d'un CallbackQuery."""
     if isinstance(update, Update):
         return update.effective_message
     if hasattr(update, 'message') and update.message:
@@ -255,7 +248,6 @@ async def traiter_achat_en_attente(ctx, update, uid):
         return True
     except Exception as e:
         log.error(f"Erreur lors du déclenchement de l'achat {annonce_id} pour {uid}: {e}")
-        # Tenter d'envoyer un message d'erreur si on a un message
         msg_error = _extraire_message(update)
         if msg_error:
             try:
@@ -268,7 +260,7 @@ async def traiter_achat_en_attente(ctx, update, uid):
         return True
 
 # ══════════════════════════════════════════════════════════════
-#  MENU PRINCIPAL (avec bouton Aide)
+#  MENU PRINCIPAL (avec bouton Demande)
 # ══════════════════════════════════════════════════════════════
 
 def build_main_menu(uid, u, cfg):
@@ -284,6 +276,7 @@ def build_main_menu(uid, u, cfg):
          InlineKeyboardButton("🔔 Alertes Jeux", callback_data="nav:mes_alertes")],
         [InlineKeyboardButton("⚖️ Centre des Litiges", callback_data="nav:mes_litiges")],
         [InlineKeyboardButton("🚫 Blacklist publique", callback_data="nav:blacklist_pub")],
+        [InlineKeyboardButton("📢 Demander un compte", callback_data="nav:demande_compte")],
         [InlineKeyboardButton("❓ Aide", callback_data="nav:help")],
     ]
     if cfg.get("recrutement_ouvert") and get_role(uid, u) == "membre":
@@ -536,6 +529,10 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
         await executer_tunnel_vente(update, ctx, uid, text=text, photo_id=photo_id)
         return
 
+    if state.startswith("DEMANDE_"):
+        await executer_demande_tunnel(update, ctx, uid, text=text)
+        return
+
     if state == "RECHERCHE_INPUT" and text:
         save_user(uid, {"state": "IDLE"})
         escaped_text = re.escape(text)
@@ -726,6 +723,10 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await handle_member_info(query, uid, parts)
         elif prefix == "rappelannonce":
             await handle_rappel_annonce(query, uid, parts)
+        elif prefix == "demandeplat":
+            await handle_demande_plat(query, ctx, uid, parts)
+        elif prefix == "modactdemande":
+            await handle_moderation_demande(query, ctx, parts)
     except Exception as e:
         log.error(f"Erreur callback '{data}' : {e}\n{traceback.format_exc()}")
         try:
@@ -734,7 +735,7 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             log.warning(f"Impossible de notifier l'erreur callback: {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  NAVIGATION (correction safe_edit pour help et cgu, annulation wallet ton)
+#  NAVIGATION
 # ══════════════════════════════════════════════════════════════
 
 async def handle_nav(query, ctx, uid, u, parts):
@@ -798,7 +799,15 @@ async def handle_nav(query, ctx, uid, u, parts):
                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
         return
 
-    # --- Les autres cibles (inchangées) ---
+    if cible == "demande_compte":
+        save_user(uid, {"state": "DEMANDE_JEU"})
+        await query.message.reply_text(
+            "🎮 <b>Quel jeu recherchez-vous ?</b>\n\nEntrez le nom du jeu :",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+        )
+        return
+
     if cible == "annuler_vente":
         db.annonces.delete_one({"vendeur_id": uid, "statut": "brouillon"})
         save_user(uid, {"state": "IDLE"})
@@ -931,7 +940,7 @@ async def handle_nav(query, ctx, uid, u, parts):
             return
         await afficher_admin_root(query, ctx, uid, u)
 
-# ──────────────── SETPROF (wallet TON corrigé : nouveau message + bouton Annuler) ────────────────
+# ──────────────── SETPROF (wallet TON corrigé) ────────────────
 
 async def handle_setprof(query, ctx, uid, parts):
     champ = parts[1]
@@ -1582,6 +1591,112 @@ async def handle_admin_action(query, ctx, uid, parts):
             await ctx.bot.send_document(uid, document=InputFile(buffer, filename=f"rapport_{fmt_date()}.txt"), caption="📊 Rapport exporté.")
         except Exception as e:
             log.error(f"Échec export : {e}")
+
+# ══════════════════════════════════════════════════════════════
+#  TUNNEL DE DEMANDE DE COMPTE (avec modération)
+# ══════════════════════════════════════════════════════════════
+
+async def executer_demande_tunnel(update, ctx, uid, text=None):
+    u = get_user(uid)
+    state = u.get("state", "IDLE")
+    if not state.startswith("DEMANDE_"):
+        return
+    if state == "DEMANDE_JEU" and text:
+        if len(text) > 50:
+            await update.effective_message.reply_text("⚠️ Nom du jeu trop long (max 50 caractères).")
+            return
+        save_user(uid, {"state": "DEMANDE_PLATEFORME"})
+        ctx.user_data["demande_jeu"] = text
+        kb = [[InlineKeyboardButton(p, callback_data=f"demandeplat:{p}") for p in ["Android", "iOS", "PC", "Console"]]]
+        await update.effective_message.reply_text("📱 <b>Plateforme recherchée :</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    elif state == "DEMANDE_DESC" and text:
+        if len(text) > 500:
+            await update.effective_message.reply_text("⚠️ Description trop longue (max 500 caractères).")
+            return
+        jeu = ctx.user_data.get("demande_jeu", "?")
+        plateforme = ctx.user_data.get("demande_plateforme", "?")
+        description = text
+        save_user(uid, {"state": "IDLE"})
+        demande_id = db.demandes.insert_one({
+            "user_id": uid,
+            "username": u.get("username", "Inconnu"),
+            "jeu": jeu,
+            "plateforme": plateforme,
+            "description": description,
+            "statut": "en_attente",
+            "date_creation": time.time()
+        }).inserted_id
+        txt_mod = (
+            f"📢 <b>DEMANDE DE COMPTE À VALIDER</b>\n\n"
+            f"👤 Demandeur : @{safe_html(u.get('username'))} (<code>{uid}</code>)\n"
+            f"🎮 Jeu : {safe_html(jeu)}\n"
+            f"📱 Plateforme : {safe_html(plateforme)}\n"
+            f"📝 Description : {safe_html(description)}"
+        )
+        kb_mod = [[
+            InlineKeyboardButton("✅ Accepter", callback_data=f"modactdemande:approuve:{demande_id}"),
+            InlineKeyboardButton("❌ Rejeter", callback_data=f"modactdemande:rejete:{demande_id}")
+        ]]
+        for gid in get_gerants_et_plus():
+            try:
+                await ctx.bot.send_message(gid, txt_mod, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_mod))
+            except Exception as e:
+                log.warning(f"Notification modération demande {demande_id} à {gid} : {e}")
+        await update.effective_message.reply_text("✅ Votre demande a été transmise à l'équipe. Elle sera publiée après validation.")
+        ctx.user_data.pop("demande_jeu", None)
+        ctx.user_data.pop("demande_plateforme", None)
+        return
+
+async def handle_demande_plat(query, ctx, uid, parts):
+    plateforme = parts[1]
+    ctx.user_data["demande_plateforme"] = plateforme
+    save_user(uid, {"state": "DEMANDE_DESC"})
+    await safe_edit(query, "📝 <b>Décrivez le compte recherché :</b>", parse_mode="HTML")
+
+async def handle_moderation_demande(query, ctx, parts):
+    if not has_level(query.from_user.id, get_user(query.from_user.id), "gerant"):
+        await query.answer("🚫 Réservé à l'équipe.", show_alert=True)
+        return
+    act, demande_id = parts[1], parts[2]
+    oid = try_objectid(demande_id)
+    if not oid:
+        await query.answer("ID invalide.")
+        return
+    demande = db.demandes.find_one({"_id": oid})
+    if not demande:
+        await query.answer("Demande introuvable.")
+        return
+    if demande["statut"] != "en_attente":
+        await query.answer("Demande déjà traitée.")
+        return
+
+    if act == "approuve":
+        txt_pub = (
+            f"🔍 <b>DEMANDE DE COMPTE</b>\n\n"
+            f"🎮 <b>Jeu :</b> {safe_html(demande['jeu'])}\n"
+            f"📱 <b>Plateforme :</b> {safe_html(demande['plateforme'])}\n"
+            f"📝 <b>Description :</b> {safe_html(demande['description'])}\n\n"
+            f"👤 <b>Demandeur :</b> @{safe_html(demande['username'])}"
+        )
+        kb_pub = [[InlineKeyboardButton("💬 Contacter le demandeur", url=f"tg://user?id={demande['user_id']}")]]
+        try:
+            await ctx.bot.send_message(PUBLIC_CHANNEL_ID, txt_pub, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_pub))
+            db.demandes.update_one({"_id": oid}, {"$set": {"statut": "approuve"}})
+            await ctx.bot.send_message(demande["user_id"], "✅ Votre demande de compte a été validée et publiée sur le canal !")
+            await query.message.edit_text("✅ Demande approuvée et publiée.")
+        except Exception as e:
+            log.error(f"Échec publication demande : {e}")
+            await query.answer("Erreur lors de la publication.", show_alert=True)
+        return
+    else:
+        db.demandes.update_one({"_id": oid}, {"$set": {"statut": "rejete"}})
+        try:
+            await ctx.bot.send_message(demande["user_id"], "❌ Votre demande de compte a été refusée par l'équipe.")
+        except Exception as e:
+            log.warning(f"Notification refus demande {demande_id}: {e}")
+        await query.message.edit_text("❌ Demande rejetée.")
+        return
 
 # ══════════════════════════════════════════════════════════════
 #  RAPPEL AUTOMATIQUE DE VALIDITÉ DES ANNONCES
