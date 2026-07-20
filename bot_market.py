@@ -4,11 +4,9 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.8 – Demande de compte avec modération
-- Nouveau bouton "📢 Demander un compte"
-- Tunnel de demande (jeu, plateforme, description)
-- Validation par l'équipe avant publication
-- Toutes les fonctionnalités antérieures conservées
+v4.9 – Correction du flux d'achat pour les membres vérifiés
+- Traitement immédiat de l'achat si l'utilisateur a déjà rempli les conditions
+- Toutes les autres fonctionnalités conservées
 """
 
 import os
@@ -318,7 +316,7 @@ async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
         await query.message.reply_text("Tu as déjà un brouillon en cours. Continue ou annule.")
 
 # ══════════════════════════════════════════════════════════════
-#  COMMANDE /start
+#  COMMANDE /start (avec traitement immédiat de l'achat si vérifié)
 # ══════════════════════════════════════════════════════════════
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -345,6 +343,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
+    # --- Traitement immédiat d'un achat si déjà abonné et CGU acceptées ---
+    achat_direct = None
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -361,12 +361,25 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 log.warning(f"Erreur traitement ref_: {e}")
         elif arg.startswith("acheter_"):
             annonce_id = arg.split("_", 1)[1]
-            db.achat_attente.update_one(
-                {"user_id": uid},
-                {"$set": {"annonce_id": annonce_id, "date": time.time()}},
-                upsert=True
-            )
+            if uid != SUPER_ADMIN_ID:
+                # Vérifier si l'utilisateur a déjà rempli les conditions
+                if await est_abonne_canal(ctx, uid) and u.get("cgu_acceptees", False):
+                    # Traitement immédiat
+                    await proposer_choix_achat(update.effective_message, ctx, annonce_id, uid)
+                    return
+                else:
+                    # Stocker l'intention pour plus tard
+                    db.achat_attente.update_one(
+                        {"user_id": uid},
+                        {"$set": {"annonce_id": annonce_id, "date": time.time()}},
+                        upsert=True
+                    )
+            else:
+                # Superadmin : toujours direct
+                await proposer_choix_achat(update.effective_message, ctx, annonce_id, uid)
+                return
 
+    # Vérifications normales pour les utilisateurs non vérifiés
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
