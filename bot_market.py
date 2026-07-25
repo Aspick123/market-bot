@@ -4,9 +4,13 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.9 – Correction du flux d'achat pour les membres vérifiés
-- Traitement immédiat de l'achat si l'utilisateur a déjà rempli les conditions
-- Toutes les autres fonctionnalités conservées
+v4.10 – Modération automatique du canal public
+- Suppression instantanée des messages non autorisés
+- Avertissements privés (1ère et 2ème infraction)
+- Mute de 24h à la 3ème infraction
+- Équipe (gérant+) exemptée
+- Activation/désactivation via la config
+- Toutes les fonctionnalités précédentes conservées
 """
 
 import os
@@ -20,7 +24,7 @@ import re
 from flask import Flask
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ChatPermissions
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
@@ -88,6 +92,7 @@ DEFAULTS_CONFIG = {
     ),
     "delai_rappel_annonce_jours": 30,
     "delai_inactivite_annonce_jours": 3,
+    "moderation_auto_canal": True,  # Activation de la sécurité automatique du canal
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -175,6 +180,76 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 await query.message.reply_text(truncated, reply_markup=reply_markup, parse_mode=parse_mode)
             except Exception as e2:
                 log.error(f"safe_edit a échoué : {e2}")
+
+# ══════════════════════════════════════════════════════════════
+#  MODÉRATION AUTOMATIQUE DU CANAL PUBLIC
+# ══════════════════════════════════════════════════════════════
+
+async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Supprime le message et sanctionne l'utilisateur si nécessaire."""
+    msg = update.message
+    uid = msg.from_user.id
+
+    # Ignorer les messages du bot lui-même
+    if uid == ctx.bot.id:
+        return
+
+    # Vérifier si la modération automatique est activée
+    cfg = get_config()
+    if not cfg.get("moderation_auto_canal", True):
+        return
+
+    # Exempter l'équipe
+    u = get_user(uid)
+    if has_level(uid, u, "gerant"):
+        return
+
+    # Supprimer le message
+    try:
+        await msg.delete()
+    except Exception as e:
+        log.warning(f"Échec suppression message canal (uid {uid}): {e}")
+        return
+
+    # Gérer les infractions
+    doc = db.infractions_canal.find_one({"user_id": uid})
+    if doc:
+        nb = doc.get("compteur", 0) + 1
+        db.infractions_canal.update_one({"user_id": uid}, {"$set": {"compteur": nb, "derniere": time.time()}})
+    else:
+        nb = 1
+        db.infractions_canal.insert_one({"user_id": uid, "compteur": nb, "derniere": time.time()})
+
+    if nb == 1:
+        try:
+            await ctx.bot.send_message(uid,
+                "⚠️ Vous avez envoyé un message directement sur le canal. Merci d'utiliser le bot pour publier vos annonces. "
+                "Ceci est un premier avertissement. Au troisième avertissement, vous serez mis en sourdine 24h.")
+        except Exception as e:
+            log.warning(f"Échec envoi avertissement 1 à {uid}: {e}")
+    elif nb == 2:
+        try:
+            await ctx.bot.send_message(uid,
+                "⚠️ Deuxième avertissement : vous avez de nouveau posté directement sur le canal. "
+                "Veuillez utiliser le bot. La prochaine infraction entraînera une mise en sourdine de 24h.")
+        except Exception as e:
+            log.warning(f"Échec envoi avertissement 2 à {uid}: {e}")
+    elif nb >= 3:
+        mute_until = int(time.time() + 86400)  # 24 heures
+        try:
+            await ctx.bot.restrict_chat_member(
+                chat_id=PUBLIC_CHANNEL_ID,
+                user_id=uid,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=mute_until
+            )
+            db.infractions_canal.update_one({"user_id": uid}, {"$set": {"compteur": 0}})
+            await ctx.bot.send_message(uid,
+                "🔇 Vous avez été mis en sourdine sur le canal pendant 24 heures pour avoir ignoré les avertissements. "
+                "Utilisez le bot pour vos annonces.")
+            log_audit("MUTE_CANAL", f"uid={uid} pour 24h (3 infractions)", 0)
+        except Exception as e:
+            log.error(f"Échec restriction canal pour {uid}: {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  VÉRIFICATIONS OBLIGATOIRES (ABONNEMENT + CGU)
@@ -343,8 +418,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_user(uid, {"username": uname, "state": "IDLE"})
     u["username"] = uname
 
-    # --- Traitement immédiat d'un achat si déjà abonné et CGU acceptées ---
-    achat_direct = None
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("ref_"):
@@ -362,24 +435,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif arg.startswith("acheter_"):
             annonce_id = arg.split("_", 1)[1]
             if uid != SUPER_ADMIN_ID:
-                # Vérifier si l'utilisateur a déjà rempli les conditions
                 if await est_abonne_canal(ctx, uid) and u.get("cgu_acceptees", False):
-                    # Traitement immédiat
                     await proposer_choix_achat(update.effective_message, ctx, annonce_id, uid)
                     return
                 else:
-                    # Stocker l'intention pour plus tard
                     db.achat_attente.update_one(
                         {"user_id": uid},
                         {"$set": {"annonce_id": annonce_id, "date": time.time()}},
                         upsert=True
                     )
             else:
-                # Superadmin : toujours direct
                 await proposer_choix_achat(update.effective_message, ctx, annonce_id, uid)
                 return
 
-    # Vérifications normales pour les utilisateurs non vérifiés
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
@@ -1139,7 +1207,7 @@ async def handle_view_annonce(query, ctx, parts):
     except Exception as e:
         log.error(f"Échec affichage : {e}")
 
-# ──────────────── CHOIX ACHAT (protection renforcée + correction passer_escrow) ────────────────
+# ──────────────── CHOIX ACHAT (protection renforcée + gestion erreur escrow) ────────────────
 
 async def proposer_choix_achat(message, ctx, id_ann, uid):
     try:
@@ -1196,9 +1264,15 @@ async def handle_achat_choice(query, ctx, uid, parts):
                         InlineKeyboardMarkup(kb_switch))
 
     elif mode == "escrow":
-        escrow_id = await ton.initier_escrow(ctx.bot, ann, uid, query.from_user.username or str(uid))
-        if escrow_id:
-            await query.message.reply_text("🔒 Procédure Escrow lancée, regarde le message reçu.")
+        try:
+            escrow_id = await ton.initier_escrow(ctx.bot, ann, uid, query.from_user.username or str(uid))
+            if escrow_id:
+                await query.message.reply_text("🔒 Procédure Escrow lancée, regarde le message reçu.")
+            else:
+                await query.message.reply_text("⚠️ Impossible de lancer l'Escrow (vérifie les montants ou réessaie plus tard).")
+        except Exception as e:
+            log.error(f"Erreur initier_escrow pour annonce {id_ann}: {e}\n{traceback.format_exc()}")
+            await query.message.reply_text("⚠️ Une erreur technique est survenue lors de l'ouverture de l'Escrow. Réessaie ou contacte le support.")
 
     elif mode == "passer_escrow":
         trx_id = parts[2]
@@ -1984,6 +2058,8 @@ def main():
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CallbackQueryHandler(central_callback_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2))
+    # Handler pour le canal public : supprimer les messages non autorisés
+    app.add_handler(MessageHandler(filters.Chat(chat_id=PUBLIC_CHANNEL_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
     app.add_error_handler(global_error_handler)
 
     if app.job_queue:
