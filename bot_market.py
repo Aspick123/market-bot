@@ -4,11 +4,11 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.11 – Corrections rétrogradation et sécurité canal
-- Boutons Promouvoir/Rétrograder dans le panneau admin
-- Handler canal avant le handler général (priorité)
-- Exclusion du canal dans le handler général
-- Toutes les fonctionnalités précédentes conservées
+v4.12 – Correction sécurité groupe vs canal
+- Sécurité appliquée sur le groupe (SECURITY_GROUP_ID = @comptedejeu)
+- Canal de publication (PUBLIC_CHANNEL_ID = @comptedejeux) inchangé
+- Rétrogradation membres fonctionnelle
+- Toutes les fonctionnalités conservées
 """
 
 import os
@@ -53,7 +53,8 @@ log = logging.getLogger("BotMarket")
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEOWHMNfBVzYgsvl6LXZ0DZ8i2YsO6Zyuw")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
-PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID", "@comptedejeux")
+PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID", "@comptedejeux")   # Canal de publication
+SECURITY_GROUP_ID = os.environ.get("SECURITY_GROUP_ID", "@comptedejeu")   # Groupe pour la sécurité
 TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 
 client = MongoClient(MONGO_URI)
@@ -90,7 +91,7 @@ DEFAULTS_CONFIG = {
     ),
     "delai_rappel_annonce_jours": 30,
     "delai_inactivite_annonce_jours": 3,
-    "moderation_auto_canal": True,          # Activation de la sécurité automatique du canal
+    "moderation_auto_canal": True,          # Activation de la sécurité automatique
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -180,7 +181,7 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 log.error(f"safe_edit a échoué : {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  MODÉRATION AUTOMATIQUE DU CANAL PUBLIC (corrigée priorité)
+#  MODÉRATION AUTOMATIQUE DU GROUPE (SECURITY_GROUP_ID)
 # ══════════════════════════════════════════════════════════════
 
 async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -201,7 +202,7 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
     try:
         await msg.delete()
     except Exception as e:
-        log.warning(f"Échec suppression message canal (uid {uid}): {e}")
+        log.warning(f"Échec suppression message groupe (uid {uid}): {e}")
         return
 
     doc = db.infractions_canal.find_one({"user_id": uid})
@@ -215,14 +216,14 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if nb == 1:
         try:
             await ctx.bot.send_message(uid,
-                "⚠️ Vous avez envoyé un message directement sur le canal. Merci d'utiliser le bot pour publier vos annonces. "
+                "⚠️ Vous avez envoyé un message directement sur le groupe. Merci d'utiliser le bot pour publier vos annonces. "
                 "Ceci est un premier avertissement. Au troisième avertissement, vous serez mis en sourdine 24h.")
         except Exception as e:
             log.warning(f"Échec envoi avertissement 1 à {uid}: {e}")
     elif nb == 2:
         try:
             await ctx.bot.send_message(uid,
-                "⚠️ Deuxième avertissement : vous avez de nouveau posté directement sur le canal. "
+                "⚠️ Deuxième avertissement : vous avez de nouveau posté directement sur le groupe. "
                 "Veuillez utiliser le bot. La prochaine infraction entraînera une mise en sourdine de 24h.")
         except Exception as e:
             log.warning(f"Échec envoi avertissement 2 à {uid}: {e}")
@@ -230,18 +231,18 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         mute_until = int(time.time() + 86400)
         try:
             await ctx.bot.restrict_chat_member(
-                chat_id=PUBLIC_CHANNEL_ID,
+                chat_id=SECURITY_GROUP_ID,
                 user_id=uid,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=mute_until
             )
             db.infractions_canal.update_one({"user_id": uid}, {"$set": {"compteur": 0}})
             await ctx.bot.send_message(uid,
-                "🔇 Vous avez été mis en sourdine sur le canal pendant 24 heures pour avoir ignoré les avertissements. "
+                "🔇 Vous avez été mis en sourdine sur le groupe pendant 24 heures pour avoir ignoré les avertissements. "
                 "Utilisez le bot pour vos annonces.")
-            log_audit("MUTE_CANAL", f"uid={uid} pour 24h (3 infractions)", 0)
+            log_audit("MUTE_GROUPE", f"uid={uid} pour 24h (3 infractions)", 0)
         except Exception as e:
-            log.error(f"Échec restriction canal pour {uid}: {e}")
+            log.error(f"Échec restriction groupe pour {uid}: {e}")
 
 # ══════════════════════════════════════════════════════════════
 #  VÉRIFICATIONS OBLIGATOIRES (ABONNEMENT + CGU)
@@ -1419,7 +1420,6 @@ async def handle_members_page(query, ctx, uid, u, parts):
         bl = "🚫" if is_blacklisted(mid) else ""
         txt += f"{bl}<code>{mid}</code> — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
         kb.append([InlineKeyboardButton(f"🔍 Détails {mid}", callback_data=f"memberinfo:{mid}")])
-        # Si superadmin, on ajoute un bouton de rétrogradation si le membre n'est pas déjà membre
         if get_role(uid) == "superadmin" and role != "membre":
             kb.append([InlineKeyboardButton(f"⏬ Rétrograder {mid}", callback_data=f"admact:retrograder_membre:{mid}")])
     nav_buttons = []
@@ -1597,7 +1597,6 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "gerer_roles":
         if uid != SUPER_ADMIN_ID:
             await query.answer("🚫 Superadmin uniquement.", show_alert=True); return
-        # Nouveau sous-menu pour choisir l'action
         kb = [
             [InlineKeyboardButton("⬆️ Promouvoir Admin", callback_data="admact:promouvoir")],
             [InlineKeyboardButton("⬇️ Rétrograder Membre", callback_data="admact:retrograder")],
@@ -1618,7 +1617,6 @@ async def handle_admin_action(query, ctx, uid, parts):
                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
 
     elif act == "retrograder_membre":
-        # Rétrogradation directe depuis la liste des membres
         if uid != SUPER_ADMIN_ID: return
         target = int(parts[2])
         save_user(target, {"role": "membre"})
@@ -2085,8 +2083,8 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Handler prioritaire pour le canal public (sécurité)
-    app.add_handler(MessageHandler(filters.Chat(chat_id=PUBLIC_CHANNEL_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
+    # Handler prioritaire pour le GROUPE (sécurité)
+    app.add_handler(MessageHandler(filters.Chat(chat_id=SECURITY_GROUP_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
 
     # Commandes
     app.add_handler(CommandHandler("start", start))
@@ -2097,8 +2095,8 @@ def main():
     # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
 
-    # Handler général (exclut le canal public)
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.Chat(chat_id=PUBLIC_CHANNEL_ID), central_text_and_media_handler_v2))
+    # Handler général (exclut le groupe de sécurité et le canal de publication ? non, on exclut juste le groupe de sécurité)
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.Chat(chat_id=SECURITY_GROUP_ID), central_text_and_media_handler_v2))
 
     app.add_error_handler(global_error_handler)
 
