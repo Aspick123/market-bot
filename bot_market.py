@@ -4,12 +4,10 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.10 – Modération automatique du canal public
-- Suppression instantanée des messages non autorisés
-- Avertissements privés (1ère et 2ème infraction)
-- Mute de 24h à la 3ème infraction
-- Équipe (gérant+) exemptée
-- Activation/désactivation via la config
+v4.11 – Corrections rétrogradation et sécurité canal
+- Boutons Promouvoir/Rétrograder dans le panneau admin
+- Handler canal avant le handler général (priorité)
+- Exclusion du canal dans le handler général
 - Toutes les fonctionnalités précédentes conservées
 """
 
@@ -92,7 +90,7 @@ DEFAULTS_CONFIG = {
     ),
     "delai_rappel_annonce_jours": 30,
     "delai_inactivite_annonce_jours": 3,
-    "moderation_auto_canal": True,  # Activation de la sécurité automatique du canal
+    "moderation_auto_canal": True,          # Activation de la sécurité automatique du canal
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -182,36 +180,30 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 log.error(f"safe_edit a échoué : {e2}")
 
 # ══════════════════════════════════════════════════════════════
-#  MODÉRATION AUTOMATIQUE DU CANAL PUBLIC
+#  MODÉRATION AUTOMATIQUE DU CANAL PUBLIC (corrigée priorité)
 # ══════════════════════════════════════════════════════════════
 
 async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Supprime le message et sanctionne l'utilisateur si nécessaire."""
     msg = update.message
     uid = msg.from_user.id
 
-    # Ignorer les messages du bot lui-même
     if uid == ctx.bot.id:
         return
 
-    # Vérifier si la modération automatique est activée
     cfg = get_config()
     if not cfg.get("moderation_auto_canal", True):
         return
 
-    # Exempter l'équipe
     u = get_user(uid)
     if has_level(uid, u, "gerant"):
         return
 
-    # Supprimer le message
     try:
         await msg.delete()
     except Exception as e:
         log.warning(f"Échec suppression message canal (uid {uid}): {e}")
         return
 
-    # Gérer les infractions
     doc = db.infractions_canal.find_one({"user_id": uid})
     if doc:
         nb = doc.get("compteur", 0) + 1
@@ -235,7 +227,7 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         except Exception as e:
             log.warning(f"Échec envoi avertissement 2 à {uid}: {e}")
     elif nb >= 3:
-        mute_until = int(time.time() + 86400)  # 24 heures
+        mute_until = int(time.time() + 86400)
         try:
             await ctx.bot.restrict_chat_member(
                 chat_id=PUBLIC_CHANNEL_ID,
@@ -1346,7 +1338,7 @@ async def handle_role_action(query, ctx, uid, parts):
         save_user(target, {"role": "admin"})
         log_audit("PROMOTION_ADMIN", str(target), uid)
         await query.message.reply_text(f"✅ {target} promu Admin.")
-    elif act == "retrograder":
+    elif act == "retrograder_membre":
         target = int(parts[2])
         save_user(target, {"role": "membre"})
         log_audit("RETROGRADATION", str(target), uid)
@@ -1427,6 +1419,9 @@ async def handle_members_page(query, ctx, uid, u, parts):
         bl = "🚫" if is_blacklisted(mid) else ""
         txt += f"{bl}<code>{mid}</code> — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
         kb.append([InlineKeyboardButton(f"🔍 Détails {mid}", callback_data=f"memberinfo:{mid}")])
+        # Si superadmin, on ajoute un bouton de rétrogradation si le membre n'est pas déjà membre
+        if get_role(uid) == "superadmin" and role != "membre":
+            kb.append([InlineKeyboardButton(f"⏬ Rétrograder {mid}", callback_data=f"admact:retrograder_membre:{mid}")])
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"memberspage:{page-1}"))
@@ -1488,7 +1483,7 @@ async def handle_member_info(query, uid, parts):
     kb = [[InlineKeyboardButton("🔙 Retour à la liste", callback_data="memberspage:0")]]
     await query.message.edit_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
-# ──────────────── AUTRES HANDLERS ADMIN ────────────────
+# ──────────────── AUTRES HANDLERS ADMIN (rétrogradation incluse) ────────────────
 
 async def handle_admin_action(query, ctx, uid, parts):
     u = get_user(uid)
@@ -1602,8 +1597,33 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "gerer_roles":
         if uid != SUPER_ADMIN_ID:
             await query.answer("🚫 Superadmin uniquement.", show_alert=True); return
-        save_user(uid, {"state": "ADMIN_ROLE_ID"})
-        await safe_edit(query, "👥 Tape l'ID Telegram à promouvoir Admin :")
+        # Nouveau sous-menu pour choisir l'action
+        kb = [
+            [InlineKeyboardButton("⬆️ Promouvoir Admin", callback_data="admact:promouvoir")],
+            [InlineKeyboardButton("⬇️ Rétrograder Membre", callback_data="admact:retrograder")],
+            [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
+        ]
+        await safe_edit(query, "👥 <b>Gestion des rôles</b>\nChoisissez une action :", InlineKeyboardMarkup(kb))
+
+    elif act == "promouvoir":
+        if uid != SUPER_ADMIN_ID: return
+        save_user(uid, {"state": "ADMIN_PROMOUVOIR"})
+        await query.message.edit_text("⬆️ <b>Promotion Admin</b>\nEntrez l'ID de l'utilisateur à promouvoir :",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
+
+    elif act == "retrograder":
+        if uid != SUPER_ADMIN_ID: return
+        save_user(uid, {"state": "ADMIN_RETROGRADER"})
+        await query.message.edit_text("⬇️ <b>Rétrogradation Membre</b>\nEntrez l'ID de l'utilisateur à rétrograder :",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
+
+    elif act == "retrograder_membre":
+        # Rétrogradation directe depuis la liste des membres
+        if uid != SUPER_ADMIN_ID: return
+        target = int(parts[2])
+        save_user(target, {"role": "membre"})
+        log_audit("RETROGRADATION", str(target), uid)
+        await query.message.edit_text(f"✅ {target} rétrogradé Membre.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]]))
 
     elif act == "toggle_rec":
         if uid != SUPER_ADMIN_ID: return
@@ -1931,7 +1951,7 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, parse_mode="HTML")
 
 # ══════════════════════════════════════════════════════════════
-#  ÉTATS ADMIN (blacklist, rôles)
+#  ÉTATS ADMIN (blacklist, rôles) — mis à jour
 # ══════════════════════════════════════════════════════════════
 
 async def handle_admin_states(update, ctx, uid, state, text):
@@ -1953,7 +1973,7 @@ async def handle_admin_states(update, ctx, uid, state, text):
         try: await ctx.bot.send_message(target, "🚫 Tu as été blacklisté du Marketplace.")
         except Exception as e: log.warning(f"Notification blacklist: {e}")
         return True
-    if state == "ADMIN_ROLE_ID":
+    if state == "ADMIN_PROMOUVOIR":
         try:
             target = int(text)
             save_user(target, {"role": "admin"})
@@ -1962,6 +1982,18 @@ async def handle_admin_states(update, ctx, uid, state, text):
             await update.message.reply_text(f"✅ {target} promu Admin.")
             try: await ctx.bot.send_message(target, "🎉 Tu es maintenant Admin du Marketplace !")
             except Exception as e: log.warning(f"Notification promo: {e}")
+        except Exception:
+            await update.message.reply_text("⚠️ ID invalide.")
+        return True
+    if state == "ADMIN_RETROGRADER":
+        try:
+            target = int(text)
+            save_user(target, {"role": "membre"})
+            log_audit("RETROGRADATION", str(target), uid)
+            save_user(uid, {"state": "IDLE"})
+            await update.message.reply_text(f"✅ {target} rétrogradé Membre.")
+            try: await ctx.bot.send_message(target, "🔔 Votre rôle a été modifié. Vous êtes maintenant Membre.")
+            except Exception as e: log.warning(f"Notification rétrogradation: {e}")
         except Exception:
             await update.message.reply_text("⚠️ ID invalide.")
         return True
@@ -2036,11 +2068,11 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
 
-    if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID"):
+    if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER"):
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
 
-    if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_ROLE_ID") and text:
+    if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER") and text:
         if await handle_admin_states(update, ctx, uid, state, text):
             return
 
@@ -2052,14 +2084,22 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+
+    # Handler prioritaire pour le canal public (sécurité)
+    app.add_handler(MessageHandler(filters.Chat(chat_id=PUBLIC_CHANNEL_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
+
+    # Commandes
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("alerte", cmd_alerte))
     app.add_handler(CommandHandler("info", cmd_info))
+
+    # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2))
-    # Handler pour le canal public : supprimer les messages non autorisés
-    app.add_handler(MessageHandler(filters.Chat(chat_id=PUBLIC_CHANNEL_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
+
+    # Handler général (exclut le canal public)
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.Chat(chat_id=PUBLIC_CHANNEL_ID), central_text_and_media_handler_v2))
+
     app.add_error_handler(global_error_handler)
 
     if app.job_queue:
