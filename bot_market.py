@@ -4,11 +4,11 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.12 – Correction sécurité groupe vs canal
-- Sécurité appliquée sur le groupe (SECURITY_GROUP_ID = @comptedejeu)
-- Canal de publication (PUBLIC_CHANNEL_ID = @comptedejeux) inchangé
+v4.13 – Correction sécurité (ID numérique du groupe)
+- Résolution de l'ID numérique du groupe au démarrage
+- Handler de sécurité utilise désormais l'ID numérique
 - Rétrogradation membres fonctionnelle
-- Toutes les fonctionnalités conservées
+- Toutes les fonctionnalités précédentes conservées
 """
 
 import os
@@ -56,6 +56,9 @@ SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID", "@comptedejeux")   # Canal de publication
 SECURITY_GROUP_ID = os.environ.get("SECURITY_GROUP_ID", "@comptedejeu")   # Groupe pour la sécurité
 TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
+
+# Variable qui stockera l'ID numérique du groupe de sécurité (résolu au démarrage)
+SECURITY_GROUP_ID_NUM = None
 
 client = MongoClient(MONGO_URI)
 db = client["bot_market_premium_db"]
@@ -231,7 +234,7 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         mute_until = int(time.time() + 86400)
         try:
             await ctx.bot.restrict_chat_member(
-                chat_id=SECURITY_GROUP_ID,
+                chat_id=SECURITY_GROUP_ID,  # on peut utiliser l'username ici
                 user_id=uid,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=mute_until
@@ -2045,10 +2048,21 @@ async def job_notif_tickets(ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════
 
 async def post_init(application: Application):
+    global SECURITY_GROUP_ID_NUM
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         log.warning(f"Suppression webhook : {e}")
+
+    # Résoudre l'ID numérique du groupe de sécurité
+    try:
+        chat = await application.bot.get_chat(SECURITY_GROUP_ID)
+        SECURITY_GROUP_ID_NUM = chat.id
+        log.info(f"🛡️ Sécurité groupe activée pour {SECURITY_GROUP_ID} (ID numérique: {SECURITY_GROUP_ID_NUM})")
+    except Exception as e:
+        log.error(f"Impossible de résoudre l'ID du groupe {SECURITY_GROUP_ID}: {e}")
+        SECURITY_GROUP_ID_NUM = None
+
     ton.demarrer_scanner(application.bot)
     log.info("✅ Bot Market Ultra v4.0 démarré — scanner TON actif.")
 
@@ -2083,8 +2097,11 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Handler prioritaire pour le GROUPE (sécurité)
-    app.add_handler(MessageHandler(filters.Chat(chat_id=SECURITY_GROUP_ID) & ~filters.COMMAND, supprimer_et_sanctionner))
+    # Handler prioritaire pour le GROUPE (sécurité) – utilise l'ID numérique s'il est résolu
+    if SECURITY_GROUP_ID_NUM:
+        app.add_handler(MessageHandler(filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) & ~filters.COMMAND, supprimer_et_sanctionner))
+    else:
+        log.warning("Sécurité groupe désactivée : ID numérique non résolu. Le handler de sécurité ne sera pas ajouté.")
 
     # Commandes
     app.add_handler(CommandHandler("start", start))
@@ -2095,8 +2112,9 @@ def main():
     # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
 
-    # Handler général (exclut le groupe de sécurité et le canal de publication ? non, on exclut juste le groupe de sécurité)
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.Chat(chat_id=SECURITY_GROUP_ID), central_text_and_media_handler_v2))
+    # Handler général (exclut le groupe de sécurité si son ID est connu)
+    exclusion_filter = ~filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) if SECURITY_GROUP_ID_NUM else filters.ALL
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & exclusion_filter, central_text_and_media_handler_v2))
 
     app.add_error_handler(global_error_handler)
 
