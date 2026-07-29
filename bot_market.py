@@ -4,11 +4,9 @@
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.13 – Correction sécurité (ID numérique du groupe)
-- Résolution de l'ID numérique du groupe au démarrage
-- Handler de sécurité utilise désormais l'ID numérique
-- Rétrogradation membres fonctionnelle
-- Toutes les fonctionnalités précédentes conservées
+v4.14 – Message de bienvenue automatique dans le groupe
+- Détecte les nouveaux membres et envoie un message de bienvenue
+- Maintient toutes les fonctionnalités précédentes
 """
 
 import os
@@ -25,7 +23,7 @@ from bson.objectid import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ChatPermissions
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    MessageHandler, ContextTypes, filters, ChatMemberHandler
 )
 from telegram.error import TelegramError
 
@@ -94,7 +92,7 @@ DEFAULTS_CONFIG = {
     ),
     "delai_rappel_annonce_jours": 30,
     "delai_inactivite_annonce_jours": 3,
-    "moderation_auto_canal": True,          # Activation de la sécurité automatique
+    "moderation_auto_canal": True,
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -184,6 +182,26 @@ async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
                 log.error(f"safe_edit a échoué : {e2}")
 
 # ══════════════════════════════════════════════════════════════
+#  MESSAGE DE BIENVENUE
+# ══════════════════════════════════════════════════════════════
+
+async def nouveau_membre(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Souhaite la bienvenue aux nouveaux membres du groupe."""
+    chat_member = update.chat_member
+    # On ne réagit que si le statut est devenu "member" (nouveau membre)
+    if chat_member.new_chat_member.status == "member":
+        user = chat_member.new_chat_member.user
+        username = f"@{user.username}" if user.username else user.first_name
+        try:
+            await ctx.bot.send_message(
+                chat_id=SECURITY_GROUP_ID,
+                text=f"👋 Bienvenue {username} ! Merci d'avoir rejoint le groupe. "
+                     f"Utilise le bot en message privé pour acheter ou vendre des comptes."
+            )
+        except Exception as e:
+            log.warning(f"Échec envoi message de bienvenue : {e}")
+
+# ══════════════════════════════════════════════════════════════
 #  MODÉRATION AUTOMATIQUE DU GROUPE (SECURITY_GROUP_ID)
 # ══════════════════════════════════════════════════════════════
 
@@ -234,7 +252,7 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         mute_until = int(time.time() + 86400)
         try:
             await ctx.bot.restrict_chat_member(
-                chat_id=SECURITY_GROUP_ID,  # on peut utiliser l'username ici
+                chat_id=SECURITY_GROUP_ID,
                 user_id=uid,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=mute_until
@@ -2097,11 +2115,15 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Handler prioritaire pour le GROUPE (sécurité) – utilise l'ID numérique s'il est résolu
+    # Handler de bienvenue pour les nouveaux membres du groupe
+    if SECURITY_GROUP_ID_NUM:
+        app.add_handler(ChatMemberHandler(nouveau_membre, chat_member_types=ChatMemberHandler.CHAT_MEMBER, chat_id=SECURITY_GROUP_ID_NUM))
+
+    # Handler prioritaire pour le GROUPE (sécurité)
     if SECURITY_GROUP_ID_NUM:
         app.add_handler(MessageHandler(filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) & ~filters.COMMAND, supprimer_et_sanctionner))
     else:
-        log.warning("Sécurité groupe désactivée : ID numérique non résolu. Le handler de sécurité ne sera pas ajouté.")
+        log.warning("Sécurité groupe désactivée : ID numérique non résolu.")
 
     # Commandes
     app.add_handler(CommandHandler("start", start))
@@ -2112,7 +2134,7 @@ def main():
     # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
 
-    # Handler général (exclut le groupe de sécurité si son ID est connu)
+    # Handler général (exclut le groupe de sécurité)
     exclusion_filter = ~filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) if SECURITY_GROUP_ID_NUM else filters.ALL
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & exclusion_filter, central_text_and_media_handler_v2))
 
