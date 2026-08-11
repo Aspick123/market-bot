@@ -1302,7 +1302,12 @@ async def handle_achat_choice(query, ctx, uid, parts):
                 await query.message.reply_text("⚠️ Impossible de lancer l'Escrow (vérifie les montants ou réessaie plus tard).")
         except Exception as e:
             log.error(f"Erreur initier_escrow pour annonce {id_ann}: {e}\n{traceback.format_exc()}")
-            await query.message.reply_text("⚠️ Une erreur technique est survenue lors de l'ouverture de l'Escrow. Réessaie ou contacte le support.")
+            await query.message.reply_text(
+                f"⚠️ <b>Erreur Escrow</b>\n\n"
+                f"<code>{safe_html(str(e)[:300])}</code>\n\n"
+                f"Contacte le support avec ce message.",
+                parse_mode="HTML"
+            )
 
     elif mode == "passer_escrow":
         trx_id = parts[2]

@@ -39,9 +39,12 @@ def safe_html(text) -> str:
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 def fmt_date(ts=None) -> str:
-    """Formate un timestamp en date lisible (JJ/MM/AAAA HH:MM)."""
+    """Formate un timestamp en date lisible (JJ/MM/AAAA HH:MM).
+    Accepte un timestamp (float/int), un objet datetime, ou None (maintenant)."""
     if ts is None:
         ts = time.time()
+    elif isinstance(ts, datetime.datetime):
+        ts = ts.timestamp()
     return datetime.datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
 
 def try_objectid(val):

@@ -173,14 +173,45 @@ def save_escrow_update(escrow_id, data: dict):
 # ══════════════════════════════════════════════════════════════
 
 async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str):
+    # Vérifier que la config TON est en place
+    if not TON_WALLET_ADDRESS:
+        await bot.send_message(
+            acheteur_id,
+            "⚠️ <b>Escrow indisponible</b>\n\n"
+            "Le wallet TON du bot n'est pas encore configuré.\n"
+            "Contacte le support pour activer cette fonctionnalité.",
+            parse_mode="HTML"
+        )
+        return None
+    if not TONCENTER_API_KEY:
+        log.warning("TONCENTER_API_KEY manquant — les transactions TON ne seront pas détectées.")
+
     montant_str = ann.get("prix", "0")
     try:
         montant_num = float(''.join(c for c in montant_str if c.isdigit() or c == '.'))
     except Exception:
         montant_num = 0
 
+    if montant_num <= 0:
+        await bot.send_message(
+            acheteur_id,
+            "⚠️ Le prix de cette annonce est invalide. Contacte le support.",
+            parse_mode="HTML"
+        )
+        return None
+
     devise_texte = ann.get("devise", "USD")
-    ton_amount, code, fallback = await convertir_en_ton(montant_num, devise_texte)
+    try:
+        ton_amount, code, fallback = await convertir_en_ton(montant_num, devise_texte)
+    except Exception as e:
+        log.error(f"Échec conversion devise pour {acheteur_id}: {e}")
+        await bot.send_message(
+            acheteur_id,
+            "⚠️ Impossible de calculer la conversion en TON (erreur réseau ou API).\n"
+            "Réessaie dans quelques minutes.",
+            parse_mode="HTML"
+        )
+        return None
 
     if ton_amount is None:
         await bot.send_message(
