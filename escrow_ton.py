@@ -29,9 +29,10 @@ import re
 import base64
 import asyncio
 import aiohttp
-from pymongo import MongoClient
 from bson.objectid import ObjectId
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+
+from utils import client, db, MONGO_URI, safe_html, fmt_date, try_objectid, log_audit
 
 log = logging.getLogger("EscrowTON")
 
@@ -39,14 +40,10 @@ log = logging.getLogger("EscrowTON")
 #  CONFIGURATION & CONNEXION
 # ══════════════════════════════════════════════════════════════
 
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 TON_WALLET_ADDRESS = os.environ.get("TON_WALLET_ADDRESS", "")
 TON_PRIVATE_KEY = os.environ.get("TON_PRIVATE_KEY", "")
 TONCENTER_API_KEY = os.environ.get("TONCENTER_API_KEY", "")
 TONCENTER_URL = "https://toncenter.com/api/v2"
-
-client = MongoClient(MONGO_URI)
-db = client["bot_market_premium_db"]
 
 TIMEOUT_PAIEMENT_MIN = 30
 TIMEOUT_CONFIRMATION_MIN = 30
@@ -68,18 +65,6 @@ DEFAULTS_ESCROW_CONFIG = {
 #  UTILITAIRES
 # ══════════════════════════════════════════════════════════════
 
-def fmt_date(ts=None) -> str:
-    if ts is None: ts = time.time()
-    return datetime.datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
-
-def try_objectid(val):
-    try: return ObjectId(val)
-    except Exception: return None
-
-def safe_html(text) -> str:
-    if text is None: return ""
-    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
 def get_escrow_config() -> dict:
     cfg = db.config.find_one({"type": "global"}) or {}
     return {**DEFAULTS_ESCROW_CONFIG, **cfg}
@@ -90,12 +75,6 @@ def set_config_value(key: str, value):
 def generer_memo(escrow_id) -> str:
     h = hashlib.md5(str(escrow_id).encode()).hexdigest()[:6].upper()
     return f"TX-{h}"
-
-def log_audit(action: str, details: str, acted_by: int):
-    db.audit_logs.insert_one({
-        "action": action, "details": details, "acted_by": acted_by,
-        "date": fmt_date(), "timestamp": time.time()
-    })
 
 # ══════════════════════════════════════════════════════════════
 #  CONVERSION DEVISE → TON (inchangé)

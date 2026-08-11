@@ -21,7 +21,6 @@ import threading
 import datetime
 import re
 from flask import Flask
-from pymongo import MongoClient
 from bson.objectid import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ChatPermissions
 from telegram.ext import (
@@ -30,6 +29,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
+from utils import client, db, MONGO_URI, safe_html, fmt_date, try_objectid, log_audit
 import escrow_ton as ton
 
 # ══════════════════════════════════════════════════════════════
@@ -51,7 +51,6 @@ threading.Thread(target=run_flask, daemon=True).start()
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", level=logging.INFO)
 log = logging.getLogger("BotMarket")
 
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8549692419:AAEOWHMNfBVzYgsvl6LXZ0DZ8i2YsO6Zyuw")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
 PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID", "@comptedejeux")   # Canal de publication
@@ -60,9 +59,6 @@ TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 
 # Variable qui stockera l'ID numérique du groupe de sécurité (résolu au démarrage)
 SECURITY_GROUP_ID_NUM = None
-
-client = MongoClient(MONGO_URI)
-db = client["bot_market_premium_db"]
 
 DEFAULTS_USER = {
     "username": "Inconnu", "first_name": "", "last_name": "",
@@ -120,10 +116,6 @@ def check_callback_rate(user_id: int) -> bool:
     _callback_timestamps[user_id] = timestamps
     return True
 
-def safe_html(text) -> str:
-    if text is None: return ""
-    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
 def get_config():
     cfg = db.config.find_one({"type": "global"}) or {}
     return {**DEFAULTS_CONFIG, **cfg}
@@ -153,18 +145,6 @@ def get_role(uid, u=None):
 
 def has_level(uid, u, min_role):
     return ROLE_LEVEL.get(get_role(uid, u), 0) >= ROLE_LEVEL.get(min_role, 99)
-
-def fmt_date(ts=None):
-    if ts is None: ts = time.time()
-    return datetime.datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
-
-def try_objectid(val):
-    try: return ObjectId(val)
-    except: return None
-
-def log_audit(action, details, acted_by):
-    db.audit_logs.insert_one({"action": action, "details": details, "acted_by": acted_by,
-                              "date": fmt_date(), "timestamp": time.time()})
 
 def is_blacklisted(uid):
     return db.blacklist.find_one({"user_id": uid}) is not None
@@ -2250,8 +2230,8 @@ def main():
     # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
 
-    # Handler général (tous les messages texte/photo hors groupe de sécurité)
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2), group=1)
+    # Handler général (messages privés uniquement — le groupe est géré par le handler sécurité)
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & filters.ChatType.PRIVATE, central_text_and_media_handler_v2), group=1)
 
     app.add_error_handler(global_error_handler)
 
