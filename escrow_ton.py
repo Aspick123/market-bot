@@ -26,6 +26,7 @@ import hashlib
 import logging
 import datetime
 import re
+import base64
 import asyncio
 import aiohttp
 from pymongo import MongoClient
@@ -295,7 +296,6 @@ def extraire_memo(tx) -> str:
             return msg["message"].strip()
         body = msg.get("msg_data", {})
         if body.get("text"):
-            import base64
             return base64.b64decode(body["text"]).decode("utf-8", errors="ignore").strip()
     except Exception:
         pass
@@ -752,12 +752,6 @@ async def payer_gerant(bot, gerant_id: int, montant_ton: float, super_admin_id):
 # ══════════════════════════════════════════════════════════════
 #  AUDIT & ANOMALIES — inchangé
 # ══════════════════════════════════════════════════════════════
-
-def detecter_favoritisme(admin_id: int, beneficiaire_id: int) -> bool:
-    count = db.litiges.count_documents({
-        "resolu_par": admin_id, "faveur_id": beneficiaire_id
-    })
-    return count > 3
 
 async def resume_hebdo_litiges(bot, team_channel_id):
     if not team_channel_id:

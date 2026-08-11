@@ -415,12 +415,14 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if is_blacklisted(uid) and uid != SUPER_ADMIN_ID:
         target = update.callback_query.message if update.callback_query else update.message
-        await target.reply_text("🚫 Tu es banni du Marketplace.")
+        if target:
+            await target.reply_text("🚫 Tu es banni du Marketplace.")
         return
 
     if cfg.get("mode_urgence") and uid != SUPER_ADMIN_ID:
         target = update.callback_query.message if update.callback_query else update.message
-        await target.reply_text("⚠️ <b>MAINTENANCE CRITIQUE</b>\n\nLe bot est gelé temporairement.", parse_mode="HTML")
+        if target:
+            await target.reply_text("⚠️ <b>MAINTENANCE CRITIQUE</b>\n\nLe bot est gelé temporairement.", parse_mode="HTML")
         return
 
     u = get_user(uid)
@@ -2077,8 +2079,24 @@ async def post_init(application: Application):
         chat = await application.bot.get_chat(SECURITY_GROUP_ID)
         SECURITY_GROUP_ID_NUM = chat.id
         log.info(f"🛡️ Sécurité groupe activée pour {SECURITY_GROUP_ID} (ID numérique: {SECURITY_GROUP_ID_NUM})")
+
+        # Handler de bienvenue pour les nouveaux membres du groupe
+        application.add_handler(ChatMemberHandler(
+            nouveau_membre,
+            chat_member_types=ChatMemberHandler.CHAT_MEMBER,
+            chat_id=SECURITY_GROUP_ID_NUM
+        ))
+
+        # Handler prioritaire pour le GROUPE (suppression messages + sanctions)
+        application.add_handler(MessageHandler(
+            filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) & ~filters.COMMAND,
+            supprimer_et_sanctionner
+        ), group=-1)
+
+        log.info("🛡️ Handlers de sécurité du groupe activés.")
     except Exception as e:
         log.error(f"Impossible de résoudre l'ID du groupe {SECURITY_GROUP_ID}: {e}")
+        log.warning("⚠️ Sécurité groupe désactivée — ID numérique non résolu.")
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
@@ -2115,16 +2133,6 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Handler de bienvenue pour les nouveaux membres du groupe
-    if SECURITY_GROUP_ID_NUM:
-        app.add_handler(ChatMemberHandler(nouveau_membre, chat_member_types=ChatMemberHandler.CHAT_MEMBER, chat_id=SECURITY_GROUP_ID_NUM))
-
-    # Handler prioritaire pour le GROUPE (sécurité)
-    if SECURITY_GROUP_ID_NUM:
-        app.add_handler(MessageHandler(filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) & ~filters.COMMAND, supprimer_et_sanctionner))
-    else:
-        log.warning("Sécurité groupe désactivée : ID numérique non résolu.")
-
     # Commandes
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -2134,9 +2142,8 @@ def main():
     # Callback
     app.add_handler(CallbackQueryHandler(central_callback_router))
 
-    # Handler général (exclut le groupe de sécurité)
-    exclusion_filter = ~filters.Chat(chat_id=SECURITY_GROUP_ID_NUM) if SECURITY_GROUP_ID_NUM else filters.ALL
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & exclusion_filter, central_text_and_media_handler_v2))
+    # Handler général (tous les messages texte/photo hors groupe de sécurité)
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, central_text_and_media_handler_v2), group=1)
 
     app.add_error_handler(global_error_handler)
 
