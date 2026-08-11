@@ -1,12 +1,15 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║         BOT MARKET ULTRA v4.0 — VERSION FINALE               ║
+║         BOT MARKET ULTRA v4.15 — CORRECTIONS GROUPE          ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.14 – Message de bienvenue automatique dans le groupe
+v4.15 – Modération groupe : liens/images/vidéos bloqués, texte autorisé
+- Affiche les vrais noms (prénom/nom) dans la liste des membres
+- Ajout config : max avertissements, durée mute (superadmin)
+- Boutons admin : lever sourdine, réinitialiser avertissements
+- v4.14 – Message de bienvenue automatique dans le groupe
 - Détecte les nouveaux membres et envoie un message de bienvenue
-- Maintient toutes les fonctionnalités précédentes
 """
 
 import os
@@ -62,7 +65,8 @@ client = MongoClient(MONGO_URI)
 db = client["bot_market_premium_db"]
 
 DEFAULTS_USER = {
-    "username": "Inconnu", "role": "membre", "state": "IDLE",
+    "username": "Inconnu", "first_name": "", "last_name": "",
+    "role": "membre", "state": "IDLE",
     "date_inscription": 0, "points": 0, "xp": 0, "parrain": None,
     "parrainages_comptes": 0, "nationalite": "Non définie",
     "telephone": "", "tel_visibilite": "masque",
@@ -93,6 +97,8 @@ DEFAULTS_CONFIG = {
     "delai_rappel_annonce_jours": 30,
     "delai_inactivite_annonce_jours": 3,
     "moderation_auto_canal": True,
+    "groupe_max_avertissements": 3,
+    "groupe_duree_mute_heures": 24,
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -220,11 +226,37 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if has_level(uid, u, "gerant"):
         return
 
+    # Détecter si le message contient un élément interdit
+    raison = None
+    if msg.photo or msg.video or msg.animation or msg.sticker:
+        raison = "image/vidéo/GIF/sticker"
+    elif msg.entities:
+        for ent in msg.entities:
+            if ent.type in ("url", "text_link"):
+                raison = "lien externe"
+                break
+    elif msg.caption_entities:
+        for ent in msg.caption_entities:
+            if ent.type in ("url", "text_link"):
+                raison = "lien externe"
+                break
+    # Détecter les URLs brutes dans le texte
+    if not raison and msg.text:
+        if re.search(r'https?://\S+|t\.me/\S+', msg.text):
+            raison = "lien externe"
+
+    if not raison:
+        return  # Message texte normal → autorisé
+
+    # Supprimer le message interdit
     try:
         await msg.delete()
     except Exception as e:
         log.warning(f"Échec suppression message groupe (uid {uid}): {e}")
         return
+
+    max_av = cfg.get("groupe_max_avertissements", 3)
+    mute_heures = cfg.get("groupe_duree_mute_heures", 24)
 
     doc = db.infractions_canal.find_one({"user_id": uid})
     if doc:
@@ -234,22 +266,17 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         nb = 1
         db.infractions_canal.insert_one({"user_id": uid, "compteur": nb, "derniere": time.time()})
 
-    if nb == 1:
+    if nb < max_av:
+        restant = max_av - nb
         try:
             await ctx.bot.send_message(uid,
-                "⚠️ Vous avez envoyé un message directement sur le groupe. Merci d'utiliser le bot pour publier vos annonces. "
-                "Ceci est un premier avertissement. Au troisième avertissement, vous serez mis en sourdine 24h.")
+                f"⚠️ Votre message ({raison}) a été supprimé car seuls les messages texte sont autorisés dans le groupe.\n"
+                f"Avertissement {nb}/{max_av}. Après {max_av} infractions, vous serez mis en sourdine {mute_heures}h."
+            )
         except Exception as e:
-            log.warning(f"Échec envoi avertissement 1 à {uid}: {e}")
-    elif nb == 2:
-        try:
-            await ctx.bot.send_message(uid,
-                "⚠️ Deuxième avertissement : vous avez de nouveau posté directement sur le groupe. "
-                "Veuillez utiliser le bot. La prochaine infraction entraînera une mise en sourdine de 24h.")
-        except Exception as e:
-            log.warning(f"Échec envoi avertissement 2 à {uid}: {e}")
-    elif nb >= 3:
-        mute_until = int(time.time() + 86400)
+            log.warning(f"Échec envoi avertissement à {uid}: {e}")
+    else:
+        mute_until = int(time.time() + mute_heures * 3600)
         try:
             await ctx.bot.restrict_chat_member(
                 chat_id=SECURITY_GROUP_ID,
@@ -259,9 +286,10 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
             )
             db.infractions_canal.update_one({"user_id": uid}, {"$set": {"compteur": 0}})
             await ctx.bot.send_message(uid,
-                "🔇 Vous avez été mis en sourdine sur le groupe pendant 24 heures pour avoir ignoré les avertissements. "
-                "Utilisez le bot pour vos annonces.")
-            log_audit("MUTE_GROUPE", f"uid={uid} pour 24h (3 infractions)", 0)
+                f"🔇 Vous avez été mis en sourdine pendant {mute_heures}h pour avoir ignoré les avertissements "
+                f"({raison}). Utilisez le bot pour vos annonces."
+            )
+            log_audit("MUTE_GROUPE", f"uid={uid} pour {mute_heures}h ({raison})", 0)
         except Exception as e:
             log.error(f"Échec restriction groupe pour {uid}: {e}")
 
@@ -380,7 +408,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.0</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.15</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -411,6 +439,8 @@ async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or f"User_{uid}"
+    first_name = update.effective_user.first_name or ""
+    last_name = update.effective_user.last_name or ""
     cfg = get_config()
 
     if is_blacklisted(uid) and uid != SUPER_ADMIN_ID:
@@ -431,8 +461,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"🔴 Suspendu encore {rem // 60} minutes.")
         return
 
-    save_user(uid, {"username": uname, "state": "IDLE"})
+    save_user(uid, {"username": uname, "first_name": first_name, "last_name": last_name, "state": "IDLE"})
     u["username"] = uname
+    u["first_name"] = first_name
+    u["last_name"] = last_name
 
     if ctx.args:
         arg = ctx.args[0]
@@ -747,6 +779,8 @@ ADMCFG_FIELDS = {
     "ADMCFG_COMMISSION": ("commission_pct", float),
     "ADMCFG_SEUIL": ("seuil_double_validation_ton", float),
     "ADMCFG_WALLET": ("admin_ton_wallet", str),
+    "ADMCFG_GROUPE_AV": ("groupe_max_avertissements", int),
+    "ADMCFG_GROUPE_MUTE": ("groupe_duree_mute_heures", int),
 }
 
 async def traiter_config_admin(update, ctx, state, text):
@@ -1438,11 +1472,16 @@ async def handle_members_page(query, ctx, uid, u, parts):
     for memb in users:
         mid = memb["_id"]
         uname = memb.get("username", "Inconnu")
+        first = memb.get("first_name", "")
+        last = memb.get("last_name", "")
+        nom_reel = f"{first} {last}".strip() if (first or last) else uname
         role = memb.get("role", "membre")
         date_inscr = fmt_date(memb.get("date_inscription", 0))
         bl = "🚫" if is_blacklisted(mid) else ""
-        txt += f"{bl}<code>{mid}</code> — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
-        kb.append([InlineKeyboardButton(f"🔍 Détails {mid}", callback_data=f"memberinfo:{mid}")])
+        infractions = db.infractions_canal.find_one({"user_id": mid})
+        infra_str = f" ⚠️{infractions['compteur']}" if infractions and infractions.get("compteur", 0) > 0 else ""
+        txt += f"{bl}<b>{safe_html(nom_reel)}</b>{infra_str} — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
+        kb.append([InlineKeyboardButton(f"🔍 Détails {safe_html(nom_reel)[:20]}", callback_data=f"memberinfo:{mid}")])
         if get_role(uid) == "superadmin" and role != "membre":
             kb.append([InlineKeyboardButton(f"⏬ Rétrograder {mid}", callback_data=f"admact:retrograder_membre:{mid}")])
     nav_buttons = []
@@ -1469,7 +1508,12 @@ async def handle_member_info(query, uid, parts):
         await query.answer("Utilisateur introuvable.")
         return
     role = get_role(target_id, target)
+    first = target.get("first_name", "")
+    last = target.get("last_name", "")
+    nom_reel = f"{first} {last}".strip() if (first or last) else target.get("username", "Inconnu")
     blacklist_status = "🚫 OUI" if is_blacklisted(target_id) else "✅ Non"
+    infractions = db.infractions_canal.find_one({"user_id": target_id})
+    nb_infractions = infractions["compteur"] if infractions else 0
     nb_annonces_actives = db.annonces.count_documents({"vendeur_id": target_id, "statut": "approuve"})
     nb_ventes = db.annonces.count_documents({"vendeur_id": target_id, "statut": "vendu"})
     evals = target.get("evaluations", [])
@@ -1485,12 +1529,14 @@ async def handle_member_info(query, uid, parts):
         f"👤 <b>FICHE UTILISATEUR</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         f"🆔 <b>ID :</b> <code>{target_id}</code>\n"
-        f"👤 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
+        f"👤 <b>Nom :</b> {safe_html(nom_reel)}\n"
+        f"📛 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
         f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
         f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
         f"🚫 <b>Blacklisté :</b> {blacklist_status}\n"
+        f"⚠️ <b>Avertissements groupe :</b> {nb_infractions}\n"
         f"📅 <b>Inscription :</b> {fmt_date(target.get('date_inscription', 0))}\n"
         f"📦 <b>Annonces actives :</b> {nb_annonces_actives}\n"
         f"🏷️ <b>Ventes validées :</b> {nb_ventes}\n"
@@ -1503,7 +1549,13 @@ async def handle_member_info(query, uid, parts):
         for ann in derniere_annonces:
             statut_lbl = {"en_attente": "🟡", "approuve": "✅", "rejete": "❌", "vendu": "🏷️"}.get(ann.get("statut"), "❓")
             txt += f"{statut_lbl} {safe_html(ann.get('categorie','?'))} — {safe_html(ann.get('prix','?'))} {safe_html(ann.get('devise','?'))}\n"
-    kb = [[InlineKeyboardButton("🔙 Retour à la liste", callback_data="memberspage:0")]]
+    kb = []
+    # Boutons admin : lever sanction, réinitialiser avertissements
+    if has_level(uid, get_user(uid), "admin"):
+        if nb_infractions > 0:
+            kb.append([InlineKeyboardButton("🔄 Réinitialiser les avertissements", callback_data=f"admact:reset_infractions:{target_id}")])
+        kb.append([InlineKeyboardButton("🔓 Lever la sourdine", callback_data=f"admact:lever_mute:{target_id}")])
+    kb.append([InlineKeyboardButton("🔙 Retour à la liste", callback_data="memberspage:0")])
     await query.message.edit_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 # ──────────────── AUTRES HANDLERS ADMIN (rétrogradation incluse) ────────────────
@@ -1517,6 +1569,40 @@ async def handle_admin_action(query, ctx, uid, parts):
 
     if act == "liste_membres":
         await handle_members_page(query, ctx, uid, u, ["memberspage", "0"])
+        return
+
+    if act == "lever_mute":
+        target = int(parts[2])
+        try:
+            await ctx.bot.restrict_chat_member(
+                chat_id=SECURITY_GROUP_ID,
+                user_id=target,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True
+                )
+            )
+            await query.message.edit_text(
+                f"🔓 Sourdine levée pour <code>{target}</code>.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])
+            )
+            log_audit("LEVER_MUTE", str(target), uid)
+        except Exception as e:
+            await query.answer(f"Erreur : {e}", show_alert=True)
+        return
+
+    if act == "reset_infractions":
+        target = int(parts[2])
+        db.infractions_canal.delete_one({"user_id": target})
+        await query.message.edit_text(
+            f"🔄 Avertissements réinitialisés pour <code>{target}</code>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])
+        )
+        log_audit("RESET_INFRACTIONS", str(target), uid)
         return
 
     if act == "supprimer_annonce":
@@ -1663,9 +1749,19 @@ async def handle_admin_action(query, ctx, uid, parts):
         kb = [
             [InlineKeyboardButton(f"📋 Limite annonces ({cfg.get('limite_annonces_membre')})", callback_data="admact:set_limite")],
             [InlineKeyboardButton(f"⏱️ Délai anti-arnaque ({cfg.get('delai_anti_arnaque')}s)", callback_data="admact:set_delai")],
+            [InlineKeyboardButton(f"🔧 Config Groupe ▼", callback_data="admact:config_groupe")],
             [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
         ]
         await safe_edit(query, "⚙️ <b>Configuration générale</b>", InlineKeyboardMarkup(kb))
+
+    elif act == "config_groupe":
+        if uid != SUPER_ADMIN_ID: return
+        kb = [
+            [InlineKeyboardButton(f"⚠️ Max avertissements ({cfg.get('groupe_max_avertissements', 3)})", callback_data="admact:set_groupe_av")],
+            [InlineKeyboardButton(f"⏳ Durée mute ({cfg.get('groupe_duree_mute_heures', 24)}h)", callback_data="admact:set_groupe_mute")],
+            [InlineKeyboardButton("🔙 Config", callback_data="admact:config")]
+        ]
+        await safe_edit(query, "🔧 <b>Configuration du groupe</b>\n\nRègles de modération automatique :\n• Les messages texte sont autorisés\n• Les liens, images et vidéos sont bloqués", InlineKeyboardMarkup(kb))
 
     elif act == "set_limite":
         save_user(uid, {"state": "ADMCFG_LIMITE"})
@@ -1696,6 +1792,14 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "set_wallet":
         save_user(uid, {"state": "ADMCFG_WALLET"})
         await safe_edit(query, "🏦 Adresse wallet TON pour recevoir la commission :")
+
+    elif act == "set_groupe_av":
+        save_user(uid, {"state": "ADMCFG_GROUPE_AV"})
+        await safe_edit(query, "⚠️ Nombre max d'avertissements avant mute (défaut: 3) :")
+
+    elif act == "set_groupe_mute":
+        save_user(uid, {"state": "ADMCFG_GROUPE_MUTE"})
+        await safe_edit(query, "⏳ Durée de la sourdine en heures (défaut: 24) :")
 
     elif act == "audit_log":
         if uid != SUPER_ADMIN_ID: return
@@ -1933,6 +2037,9 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     role = get_role(target_id, target)
+    first = target.get("first_name", "")
+    last = target.get("last_name", "")
+    nom_reel = f"{first} {last}".strip() if (first or last) else target.get("username", "Inconnu")
     blacklist_status = "🚫 OUI" if is_blacklisted(target_id) else "✅ Non"
     nb_annonces_actives = db.annonces.count_documents({"vendeur_id": target_id, "statut": "approuve"})
     nb_ventes = db.annonces.count_documents({"vendeur_id": target_id, "statut": "vendu"})
@@ -1950,7 +2057,8 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👤 <b>FICHE UTILISATEUR</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         f"🆔 <b>ID :</b> <code>{target_id}</code>\n"
-        f"👤 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
+        f"👤 <b>Nom :</b> {safe_html(nom_reel)}\n"
+        f"📛 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
         f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
@@ -2100,7 +2208,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.0 démarré — scanner TON actif.")
+    log.info("✅ Bot Market Ultra v4.15 démarré — scanner TON actif.")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
