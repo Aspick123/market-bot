@@ -1,8 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║                  ESCROW_TON.PY                                ║
+║                  ESCROW_TON.PY v4.2                             ║
 ║  Séquestre TON complet : memo, scan blockchain, conversion   ║
 ║  live, commission auto, double validation, reçus, paie équipe║
+║  v4.2 – Wallets lisibles depuis la config DB (plus d'env vars)║
 ╚══════════════════════════════════════════════════════════════╝
 
 Correctifs de sécurité v4.1 (audit) :
@@ -40,9 +41,10 @@ log = logging.getLogger("EscrowTON")
 #  CONFIGURATION & CONNEXION
 # ══════════════════════════════════════════════════════════════
 
-TON_WALLET_ADDRESS = os.environ.get("TON_WALLET_ADDRESS", "")
-TON_PRIVATE_KEY = os.environ.get("TON_PRIVATE_KEY", "")
-TONCENTER_API_KEY = os.environ.get("TONCENTER_API_KEY", "")
+# Note : TON_WALLET_ADDRESS, TON_PRIVATE_KEY et TONCENTER_API_KEY sont maintenant
+# stockées dans la config MongoDB (modifiables via le menu admin du bot).
+# Les variables d'environnement servent de fallback au premier démarrage.
+
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 TIMEOUT_PAIEMENT_MIN = 30
@@ -56,6 +58,9 @@ WALLET_TON_PATTERN = re.compile(r'^(EQ|UQ)[A-Za-z0-9_-]{46}$')
 DEFAULTS_ESCROW_CONFIG = {
     "commission_pct": 5,
     "admin_ton_wallet": "",
+    "ton_wallet_address": "",
+    "ton_private_key": "",
+    "toncenter_api_key": "",
     "seuil_double_validation_ton": 5.0,
     "taux_secours_ton_usd": 5.0,
     "taux_secours_usd_to_xof": 600.0,
@@ -67,7 +72,15 @@ DEFAULTS_ESCROW_CONFIG = {
 
 def get_escrow_config() -> dict:
     cfg = db.config.find_one({"type": "global"}) or {}
-    return {**DEFAULTS_ESCROW_CONFIG, **cfg}
+    merged = {**DEFAULTS_ESCROW_CONFIG, **cfg}
+    # Fallback sur les variables d'environnement si la DB est vide
+    if not merged.get("ton_wallet_address"):
+        merged["ton_wallet_address"] = os.environ.get("TON_WALLET_ADDRESS", "")
+    if not merged.get("ton_private_key"):
+        merged["ton_private_key"] = os.environ.get("TON_PRIVATE_KEY", "")
+    if not merged.get("toncenter_api_key"):
+        merged["toncenter_api_key"] = os.environ.get("TONCENTER_API_KEY", "")
+    return merged
 
 def set_config_value(key: str, value):
     db.config.update_one({"type": "global"}, {"$set": {key: value}}, upsert=True)
@@ -174,7 +187,9 @@ def save_escrow_update(escrow_id, data: dict):
 
 async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str):
     # Vérifier que la config TON est en place
-    if not TON_WALLET_ADDRESS:
+    cfg = get_escrow_config()
+    ton_wallet = cfg.get("ton_wallet_address", "")
+    if not ton_wallet:
         await bot.send_message(
             acheteur_id,
             "⚠️ <b>Escrow indisponible</b>\n\n"
@@ -183,7 +198,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
             parse_mode="HTML"
         )
         return None
-    if not TONCENTER_API_KEY:
+    if not cfg.get("toncenter_api_key"):
         log.warning("TONCENTER_API_KEY manquant — les transactions TON ne seront pas détectées.")
 
     montant_str = ann.get("prix", "0")
@@ -270,7 +285,7 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         f"💰 <b>Montant à envoyer : {ton_amount} TON</b>\n"
         f"<i>(≈ {montant_num} {code} au cours actuel)</i>{fallback_note}\n\n"
-        f"🏦 <b>Adresse wallet du bot :</b>\n<code>{TON_WALLET_ADDRESS}</code>\n\n"
+        f"🏦 <b>Adresse wallet du bot :</b>\n<code>{ton_wallet}</code>\n\n"
         f"💬 <b>Mémo OBLIGATOIRE :</b>\n<code>{memo}</code>\n\n"
         f"⚠️ <i>Sans le mémo, le paiement ne sera pas reconnu !</i>\n\n"
         f"⏳ Tu as <b>{TIMEOUT_PAIEMENT_MIN} minutes</b> pour transférer.\n"
@@ -284,10 +299,13 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
 # ══════════════════════════════════════════════════════════════
 
 async def scanner_transactions_ton() -> list:
-    if not TON_WALLET_ADDRESS or not TONCENTER_API_KEY:
+    cfg = get_escrow_config()
+    ton_wallet = cfg.get("ton_wallet_address", "")
+    toncenter_key = cfg.get("toncenter_api_key", "")
+    if not ton_wallet or not toncenter_key:
         return []
-    headers = {"X-API-Key": TONCENTER_API_KEY}
-    params = {"address": TON_WALLET_ADDRESS, "limit": 20, "to_lt": 0, "archival": False}
+    headers = {"X-API-Key": toncenter_key}
+    params = {"address": ton_wallet, "limit": 20, "to_lt": 0, "archival": False}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{TONCENTER_URL}/getTransactions", headers=headers,
@@ -415,20 +433,23 @@ async def acces_envoyes(bot, escrow_id, vendeur_id):
 # ══════════════════════════════════════════════════════════════
 
 async def envoyer_ton(to_address: str, amount_ton: float, comment: str = "") -> bool:
-    if not TON_PRIVATE_KEY or not to_address:
+    cfg = get_escrow_config()
+    ton_private_key = cfg.get("ton_private_key", "")
+    toncenter_key = cfg.get("toncenter_api_key", "")
+    if not ton_private_key or not to_address:
         log.error("Wallet privé ou destinataire manquant.")
         return False
     try:
         from tonsdk.contract.wallet import Wallets, WalletVersionEnum
         from tonsdk.utils import to_nano, bytes_to_b64str
 
-        mnemonics = TON_PRIVATE_KEY.split()
+        mnemonics = ton_private_key.split()
         _m, pub_k, priv_k, wallet = Wallets.from_mnemonics(mnemonics, WalletVersionEnum.v4r2, 0)
         seqno = await get_seqno(wallet.address.to_string(True, True, True))
         query = wallet.create_transfer_message(to_addr=to_address, amount=to_nano(amount_ton, "ton"),
                                                 seqno=seqno, payload=comment)
         boc = bytes_to_b64str(query["message"].to_boc(False))
-        headers = {"X-API-Key": TONCENTER_API_KEY, "Content-Type": "application/json"}
+        headers = {"X-API-Key": toncenter_key, "Content-Type": "application/json"}
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{TONCENTER_URL}/sendBoc", headers=headers,
                                     json={"boc": boc}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -442,7 +463,9 @@ async def envoyer_ton(to_address: str, amount_ton: float, comment: str = "") -> 
         return False
 
 async def get_seqno(address: str) -> int:
-    headers = {"X-API-Key": TONCENTER_API_KEY}
+    cfg = get_escrow_config()
+    toncenter_key = cfg.get("toncenter_api_key", "")
+    headers = {"X-API-Key": toncenter_key}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{TONCENTER_URL}/runGetMethod", headers=headers,

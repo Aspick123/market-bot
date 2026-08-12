@@ -1,10 +1,12 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║         BOT MARKET ULTRA v4.15 — CORRECTIONS GROUPE          ║
+║         BOT MARKET ULTRA v4.16 — WALLETS MENU + GROUPE        ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.15 – Modération groupe : liens/images/vidéos bloqués, texte autorisé
+v4.16 – GIFs, stickers & vocaux autorisés dans le groupe
+- Wallets TON gérables via le menu admin (plus besoin de Render env vars)
+- v4.15 – Modération groupe : liens/images/vidéos bloqués, texte autorisé
 - Affiche les vrais noms (prénom/nom) dans la liste des membres
 - Ajout config : max avertissements, durée mute (superadmin)
 - Boutons admin : lever sourdine, réinitialiser avertissements
@@ -80,6 +82,7 @@ DEFAULTS_CONFIG = {
     "type": "global", "recrutement_ouvert": False, "mode_urgence": False,
     "delai_anti_arnaque": 3600, "limite_annonces_membre": 3,
     "commission_pct": 5, "admin_ton_wallet": "",
+    "ton_wallet_address": "", "ton_private_key": "", "toncenter_api_key": "",
     "seuil_double_validation_ton": 5.0,
     "taux_secours_ton_usd": 5.0, "taux_secours_usd_to_xof": 600.0,
     "cgu_text": (
@@ -207,9 +210,10 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
     # Détecter si le message contient un élément interdit
+    # GIFs (animation), stickers et messages vocaux sont autorisés
     raison = None
-    if msg.photo or msg.video or msg.animation or msg.sticker:
-        raison = "image/vidéo/GIF/sticker"
+    if msg.photo or msg.video:
+        raison = "photo/vidéo"
     elif msg.entities:
         for ent in msg.entities:
             if ent.type in ("url", "text_link"):
@@ -250,7 +254,8 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
         restant = max_av - nb
         try:
             await ctx.bot.send_message(uid,
-                f"⚠️ Votre message ({raison}) a été supprimé car seuls les messages texte sont autorisés dans le groupe.\n"
+                f"⚠️ Votre message ({raison}) a été supprimé. Les photos, vidéos et liens ne sont pas autorisés dans le groupe.\n"
+                f"✅ Les GIFs, stickers et messages vocaux sont autorisés.\n"
                 f"Avertissement {nb}/{max_av}. Après {max_av} infractions, vous serez mis en sourdine {mute_heures}h."
             )
         except Exception as e:
@@ -267,7 +272,7 @@ async def supprimer_et_sanctionner(update: Update, ctx: ContextTypes.DEFAULT_TYP
             db.infractions_canal.update_one({"user_id": uid}, {"$set": {"compteur": 0}})
             await ctx.bot.send_message(uid,
                 f"🔇 Vous avez été mis en sourdine pendant {mute_heures}h pour avoir ignoré les avertissements "
-                f"({raison}). Utilisez le bot pour vos annonces."
+                f"({raison}). Les GIFs, stickers et vocaux restent autorisés. Utilisez le bot pour vos annonces."
             )
             log_audit("MUTE_GROUPE", f"uid={uid} pour {mute_heures}h ({raison})", 0)
         except Exception as e:
@@ -388,7 +393,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.15</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.16</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -761,6 +766,9 @@ ADMCFG_FIELDS = {
     "ADMCFG_WALLET": ("admin_ton_wallet", str),
     "ADMCFG_GROUPE_AV": ("groupe_max_avertissements", int),
     "ADMCFG_GROUPE_MUTE": ("groupe_duree_mute_heures", int),
+    "ADMCFG_TON_WALLET": ("ton_wallet_address", str),
+    "ADMCFG_TON_PRIVATE_KEY": ("ton_private_key", str),
+    "ADMCFG_TONCENTER_KEY": ("toncenter_api_key", str),
 }
 
 async def traiter_config_admin(update, ctx, state, text):
@@ -1431,6 +1439,7 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("👥 Gérer Rôles", callback_data="admact:gerer_roles")])
         kb.append([InlineKeyboardButton("⚙️ Config Générale", callback_data="admact:config")])
         kb.append([InlineKeyboardButton("💰 Config TON", callback_data="admact:config_ton")])
+        kb.append([InlineKeyboardButton("💼 Gestion Wallets", callback_data="admact:gestion_wallets")])
         kb.append([InlineKeyboardButton("📊 Stats & Export", callback_data="admact:export_pdf")])
         kb.append([InlineKeyboardButton("📜 Audit Log", callback_data="admact:audit_log")])
         kb.append([InlineKeyboardButton("💸 Rémunération équipe", callback_data="tonact:rapport_remuneration")])
@@ -1746,7 +1755,7 @@ async def handle_admin_action(query, ctx, uid, parts):
             [InlineKeyboardButton(f"⏳ Durée mute ({cfg.get('groupe_duree_mute_heures', 24)}h)", callback_data="admact:set_groupe_mute")],
             [InlineKeyboardButton("🔙 Config", callback_data="admact:config")]
         ]
-        await safe_edit(query, "🔧 <b>Configuration du groupe</b>\n\nRègles de modération automatique :\n• Les messages texte sont autorisés\n• Les liens, images et vidéos sont bloqués", InlineKeyboardMarkup(kb))
+        await safe_edit(query, "🔧 <b>Configuration du groupe</b>\n\nRègles de modération automatique :\n• Les messages texte sont autorisés\n• Les GIFs, stickers et messages vocaux sont autorisés\n• Les photos, vidéos et liens sont bloqués", InlineKeyboardMarkup(kb))
 
     elif act == "set_limite":
         save_user(uid, {"state": "ADMCFG_LIMITE"})
@@ -1761,10 +1770,35 @@ async def handle_admin_action(query, ctx, uid, parts):
         kb = [
             [InlineKeyboardButton(f"💼 Commission ({cfg.get('commission_pct')}%)", callback_data="admact:set_commission")],
             [InlineKeyboardButton(f"🔐 Seuil double validation ({cfg.get('seuil_double_validation_ton')} TON)", callback_data="admact:set_seuil")],
-            [InlineKeyboardButton("🏦 Wallet TON admin", callback_data="admact:set_wallet")],
             [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
         ]
         await safe_edit(query, "💰 <b>Configuration TON</b>", InlineKeyboardMarkup(kb))
+
+    elif act == "gestion_wallets":
+        if uid != SUPER_ADMIN_ID: return
+        tw = cfg.get("ton_wallet_address", "") or "Non défini"
+        tp = cfg.get("ton_private_key", "")
+        tk = cfg.get("toncenter_api_key", "") or "Non définie"
+        aw = cfg.get("admin_ton_wallet", "") or "Non défini"
+        # Masquer la clé privée pour l'affichage
+        pk_display = (tp[:6] + "…" + tp[-4:]) if len(tp) > 10 else ("✅ Définie" if tp else "❌ Non définie")
+        tw_display = (tw[:6] + "…" + tw[-4:]) if len(tw) > 10 else ("✅ Définie" if tw else "❌ Non défini")
+        txt_wallets = (
+            f"💼 <b>GESTION DES WALLETS</b>\n\n"
+            f"🏦 <b>Wallet du bot :</b>\n<code>{safe_html(tw_display)}</code>\n\n"
+            f"🔐 <b>Clé privée du bot :</b>\n<code>{safe_html(pk_display)}</code>\n\n"
+            f"📡 <b>Clé API TonCenter :</b>\n<code>{safe_html(tk[:8] + '…' if len(tk) > 8 else tk)}</code>\n\n"
+            f"💸 <b>Wallet commission admin :</b>\n<code>{safe_html(aw[:10] + '…' if len(aw) > 10 else aw)}</code>\n\n"
+            f"<i>⚠️ Ces informations sont sensibles. Ne les partagez jamais.</i>"
+        )
+        kb = [
+            [InlineKeyboardButton("🏦 Modifier wallet bot", callback_data="admact:set_ton_wallet")],
+            [InlineKeyboardButton("🔐 Modifier clé privée bot", callback_data="admact:set_ton_private_key")],
+            [InlineKeyboardButton("📡 Modifier clé API TonCenter", callback_data="admact:set_toncenter_key")],
+            [InlineKeyboardButton("💸 Modifier wallet commission", callback_data="admact:set_wallet")],
+            [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
+        ]
+        await safe_edit(query, txt_wallets, InlineKeyboardMarkup(kb))
 
     elif act == "set_commission":
         save_user(uid, {"state": "ADMCFG_COMMISSION"})
@@ -1776,7 +1810,19 @@ async def handle_admin_action(query, ctx, uid, parts):
 
     elif act == "set_wallet":
         save_user(uid, {"state": "ADMCFG_WALLET"})
-        await safe_edit(query, "🏦 Adresse wallet TON pour recevoir la commission :")
+        await safe_edit(query, "💸 Adresse wallet TON pour recevoir la commission :")
+
+    elif act == "set_ton_wallet":
+        save_user(uid, {"state": "ADMCFG_TON_WALLET"})
+        await safe_edit(query, "🏦 <b>Wallet TON du bot</b>\n\nEntre l'adresse du wallet qui reçoit les paiements Escrow (format EQ... ou UQ...) :")
+
+    elif act == "set_ton_private_key":
+        save_user(uid, {"state": "ADMCFG_TON_PRIVATE_KEY"})
+        await safe_edit(query, "🔐 <b>Clé privée du bot</b>\n\nEntre la phrase mnémonique de 24 mots du wallet bot.\n⚠️ Cette information est TRÈS sensible. Assure-toi que personne ne peut voir ton écran.")
+
+    elif act == "set_toncenter_key":
+        save_user(uid, {"state": "ADMCFG_TONCENTER_KEY"})
+        await safe_edit(query, "📡 <b>Clé API TonCenter</b>\n\nEntre ta clé API TonCenter (gratuite sur toncenter.com) :")
 
     elif act == "set_groupe_av":
         save_user(uid, {"state": "ADMCFG_GROUPE_AV"})
