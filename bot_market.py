@@ -1,10 +1,11 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   BOT MARKET ULTRA v4.20 — CERTIFICATION + VÉRIF DISPO        ║
+║    BOT MARKET ULTRA v4.21 — PROFIL PROPRE + WALLET SPOILER    ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.20 – Certification des vendeurs de confiance + vérification disponibilité (Direct)
+v4.21 – Profil plus propre + wallet masqué (spoiler Telegram)
+- v4.20 – Certification des vendeurs de confiance + vérification disponibilité (Direct)
 - v4.19 – Gestion d'équipe complète : rémunération hybride (points + salaire fixe)
 - Interrupteur ON/OFF, dashboard équipe, historique paiements, reset mensuel
 - Wallet TON obligatoire pour publier une annonce
@@ -412,7 +413,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.20</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.21</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -809,8 +810,22 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
 
     if state.startswith("SETPROF_") and text:
         champ = state.split("_", 1)[1].lower()
+        # Trouver le libellé du champ pour un affichage propre
+        label = champ
+        emoji = "✏️"
+        for key, (em, lib, db_field, _ex) in LABELS_CHAMPS.items():
+            if db_field == champ:
+                label = lib
+                emoji = em
+                break
+        ancien = u.get(champ, "") or "Non défini"
         save_user(uid, {champ: text, "state": "IDLE"})
-        await update.message.reply_text(f"✅ Profil mis à jour ! [{champ}] enregistré.")
+        await update.message.reply_text(
+            f"{emoji} <b>Profil mis à jour !</b>\n\n"
+            f"{safe_html(label)} :\n"
+            f"<s>{safe_html(ancien)}</s> → <b>{safe_html(text)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 Voir mon profil", callback_data="nav:mon_profil")]]))
         return
 
     if state == "CANDIDATURE_MOTIF" and text:
@@ -1166,7 +1181,7 @@ async def handle_nav(query, ctx, uid, u, parts):
             f"📞 {safe_html(u.get('telephone') or 'Non configuré')} ({safe_html(u.get('tel_visibilite'))})\n"
             f"⏰ {safe_html(u.get('plage_horaire'))}\n"
             f"🟢 <b>{safe_html(u.get('status_dispo','en ligne')).upper()}</b>\n"
-            f"💼 Wallet TON : <code>{safe_html(wallet)}</code>\n"
+            f"💼 Wallet TON : <tg-spoiler><code>{safe_html(wallet)}</code></tg-spoiler>\n"
             f"🤝 Ventes : {nb_ventes} | 🎁 Filleuls qualifiés : {u.get('filleuls_qualifies',0)} | ⚡ Points : {u.get('points',0)}\n"
             f"📈 Réputation : {stars}"
         )
@@ -1271,17 +1286,37 @@ async def handle_nav(query, ctx, uid, u, parts):
 
 # ──────────────── SETPROF (wallet TON corrigé) ────────────────
 
+LABELS_CHAMPS = {
+    "NATIONALITE": ("🌍", "Pays", "nationalite", "ex: Sénégal, Côte d'Ivoire, France..."),
+    "TELEPHONE": ("📞", "Téléphone", "telephone", "ex: +221 77 123 45 67"),
+    "PLAGE_HORAIRE": ("⏰", "Horaires", "plage_horaire", "ex: 08:00 - 22:00"),
+}
+
 async def handle_setprof(query, ctx, uid, parts):
     champ = parts[1]
     if champ == "WALLET_TON":
         ctx.user_data["ton_state"] = "saisir_wallet_ton"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_ton_wallet")]])
         await query.message.reply_text(
-            "💼 Envoie ton adresse wallet TON (commence par EQ ou UQ) :",
-            reply_markup=kb)
+            "💼 <b>Wallet TON</b>\n\n"
+            "Envoie ton adresse wallet TON.\n"
+            "Elle commence par <b>EQ</b> ou <b>UQ</b> et fait 48 caractères.\n\n"
+            "<i>💡 C'est l'adresse où tu recevras l'argent de tes ventes.</i>",
+            parse_mode="HTML", reply_markup=kb)
         return
+    if champ not in LABELS_CHAMPS:
+        await query.answer("❌ Champ inconnu.", show_alert=True)
+        return
+    emoji, label, champ_db, exemple = LABELS_CHAMPS[champ]
+    u = get_user(uid)
+    ancien = u.get(champ_db, "") or "Non défini"
     save_user(uid, {"state": f"SETPROF_{champ}"})
-    await safe_edit(query, f"✍️ Nouvelle valeur pour : <b>{champ}</b>")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+    await safe_edit(query,
+        f"{emoji} <b>Modification : {label}</b>\n\n"
+        f"Valeur actuelle : <b>{safe_html(ancien)}</b>\n\n"
+        f"Envoie la nouvelle valeur ({exemple}) :",
+        kb)
 
 # ──────────────── GESTION PHOTOS (fin_photos vérifie photo obligatoire) ────────────────
 
@@ -1773,7 +1808,7 @@ async def handle_member_info(query, uid, parts):
         f"🔷 <b>Certification :</b> {'Vendeur certifié' if target.get('certifie', False) else 'Non certifié'}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
-        f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
+        f"💼 <b>Wallet TON :</b> <tg-spoiler><code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code></tg-spoiler>\n"
         f"🚫 <b>Blacklisté :</b> {blacklist_status}\n"
         f"⚠️ <b>Avertissements groupe :</b> {nb_infractions}\n"
         f"📅 <b>Inscription :</b> {fmt_date(target.get('date_inscription', 0))}\n"
@@ -2581,7 +2616,7 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔷 <b>Certification :</b> {'Vendeur certifié' if target.get('certifie', False) else 'Non certifié'}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
-        f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
+        f"💼 <b>Wallet TON :</b> <tg-spoiler><code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code></tg-spoiler>\n"
         f"🚫 <b>Blacklisté :</b> {blacklist_status}\n"
         f"📅 <b>Inscription :</b> {fmt_date(target.get('date_inscription', 0))}\n"
         f"📦 <b>Annonces actives :</b> {nb_annonces_actives}\n"
@@ -2895,7 +2930,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.20 démarré — scanner TON + certification + vérif dispo actifs.")
+    log.info("✅ Bot Market Ultra v4.21 démarré — profil propre + wallet masqué actifs.")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
