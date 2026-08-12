@@ -1,10 +1,12 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║         BOT MARKET ULTRA v4.16 — WALLETS MENU + GROUPE        ║
+║         BOT MARKET ULTRA v4.17 — BUGFIX + ANIMATIONS          ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.16 – GIFs, stickers & vocaux autorisés dans le groupe
+v4.17 – Parrainage, alertes, points équipe corrigés + animations menu
+- Taux de secours TON ajoutés dans Config TON (modifiables)
+- v4.16 – GIFs, stickers & vocaux autorisés dans le groupe
 - Wallets TON gérables via le menu admin (plus besoin de Render env vars)
 - v4.15 – Modération groupe : liens/images/vidéos bloqués, texte autorisé
 - Affiche les vrais noms (prénom/nom) dans la liste des membres
@@ -393,7 +395,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.16</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.17</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -440,6 +442,23 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await target.reply_text("⚠️ <b>MAINTENANCE CRITIQUE</b>\n\nLe bot est gelé temporairement.", parse_mode="HTML")
         return
 
+    # ═══ CORRECTION v4.17 : Vérifier si l'utilisateur est NOUVEAU avant que get_user ne le crée ═══
+    existant = db.users.find_one({"_id": uid})
+    est_nouveau = existant is None
+
+    # Traiter le parrainage PENDANT que l'utilisateur est encore "nouveau"
+    parrain_id = None
+    if est_nouveau and ctx.args:
+        arg = ctx.args[0]
+        if arg.startswith("ref_"):
+            try:
+                pid = int(arg.split("_")[1])
+                if pid != uid:
+                    parrain_id = pid
+            except Exception as e:
+                log.warning(f"Erreur traitement ref_: {e}")
+
+    # Maintenant on peut créer l'utilisateur (get_user le fera si nouveau)
     u = get_user(uid)
     if u.get("banni_jusqua", 0) > time.time():
         rem = int(u["banni_jusqua"] - time.time())
@@ -451,21 +470,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u["first_name"] = first_name
     u["last_name"] = last_name
 
+    # Appliquer le parrainage si l'utilisateur est vraiment nouveau
+    if est_nouveau and parrain_id:
+        save_user(uid, {"parrain": parrain_id})
+        db.users.update_one({"_id": parrain_id}, {"$inc": {"points": 50, "parrainages_comptes": 1}})
+        try:
+            await ctx.bot.send_message(parrain_id, "🎁 +50 Points ! Un nouvel utilisateur a rejoint via ton lien de parrainage.")
+        except Exception as e:
+            log.warning(f"Impossible de notifier parrain {parrain_id}: {e}")
+
+    # Traiter les liens d'achat (acheter_XXX)
     if ctx.args:
         arg = ctx.args[0]
-        if arg.startswith("ref_"):
-            try:
-                parrain_id = int(arg.split("_")[1])
-                if parrain_id != uid and not db.users.find_one({"_id": uid}):
-                    save_user(uid, {"parrain": parrain_id})
-                    db.users.update_one({"_id": parrain_id}, {"$inc": {"points": 50, "parrainages_comptes": 1}})
-                    try:
-                        await ctx.bot.send_message(parrain_id, "🎁 +50 Points ! Un nouvel utilisateur a rejoint via ton lien.")
-                    except Exception as e:
-                        log.warning(f"Impossible de notifier parrain {parrain_id}: {e}")
-            except Exception as e:
-                log.warning(f"Erreur traitement ref_: {e}")
-        elif arg.startswith("acheter_"):
+        if arg.startswith("acheter_"):
             annonce_id = arg.split("_", 1)[1]
             if uid != SUPER_ADMIN_ID:
                 if await est_abonne_canal(ctx, uid) and u.get("cgu_acceptees", False):
@@ -615,6 +632,38 @@ def get_gerants_et_plus():
     for u in db.users.find({"role": {"$in": ["gerant", "admin"]}}):
         ids.append(u["_id"])
     return list(set(ids))
+
+# ═══ NOUVEAU v4.17 : Notifier les utilisateurs ayant des alertes sur un jeu ═══
+async def notifier_alertes_jeu(ctx, categorie: str, annonce_id):
+    """Envoie une notification aux utilisateurs qui ont une alerte correspondant à cette annonce."""
+    jeu_lower = categorie.lower().strip()
+    alertes = list(db.alertes.find({}))
+    if not alertes:
+        return
+    bot_username = (await ctx.bot.get_me()).username
+    notified = set()
+    for alerte in alertes:
+        uid = alerte["user_id"]
+        if uid in notified:
+            continue
+        jeux = alerte.get("jeux", [])
+        for j in jeux:
+            j_lower = j.lower().strip()
+            # "Tous" = abonné à tout, ou correspondance partielle
+            if j_lower == "tous" or j_lower in jeu_lower or jeu_lower in j_lower:
+                try:
+                    await ctx.bot.send_message(uid,
+                        f"🔔 <b>Nouvelle annonce correspondant à ton alerte !</b>\n\n"
+                        f"🎮 <b>{safe_html(categorie)}</b>\n\n"
+                        f"Une nouvelle annonce vient d'être publiée.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🛒 Voir l'annonce", url=f"https://t.me/{bot_username}?start=acheter_{annonce_id}")
+                        ]]))
+                    notified.add(uid)
+                except Exception as e:
+                    log.warning(f"Échec notification alerte à {uid}: {e}")
+                break  # Ne pas notifier plusieurs fois pour le même jeu
 
 # ══════════════════════════════════════════════════════════════
 #  ROUTEUR MESSAGES TEXTE & PHOTOS
@@ -769,6 +818,8 @@ ADMCFG_FIELDS = {
     "ADMCFG_TON_WALLET": ("ton_wallet_address", str),
     "ADMCFG_TON_PRIVATE_KEY": ("ton_private_key", str),
     "ADMCFG_TONCENTER_KEY": ("toncenter_api_key", str),
+    "ADMCFG_TAUX_TON_USD": ("taux_secours_ton_usd", float),
+    "ADMCFG_TAUX_USD_XOF": ("taux_secours_usd_to_xof", float),
 }
 
 async def traiter_config_admin(update, ctx, state, text):
@@ -860,6 +911,21 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 async def handle_nav(query, ctx, uid, u, parts):
     cible = parts[1]
     cfg = get_config()
+
+    # ═══ v4.17 : Animations de navigation (feedback visuel) ═══
+    NAV_EMOJIS = {
+        "recherche": "🔍", "vendre": "🎮", "marche_global": "🛍️", "mon_profil": "👤",
+        "mes_annonces": "📦", "cgu": "📜", "leaderboard": "📊", "parrainage": "🎁",
+        "mes_alertes": "🔔", "mes_litiges": "⚖️", "blacklist_pub": "🚫",
+        "demande_compte": "📢", "help": "❓", "devenir_gerant": "🎯", "admin_root": "⚡",
+        "retour": "◀️",
+    }
+    if cible in NAV_EMOJIS:
+        await query.answer(f"{NAV_EMOJIS[cible]} Chargement...")
+    elif cible == "verifier_abonnement":
+        await query.answer("🔒 Vérification...")
+    elif cible == "accepter_cgu":
+        await query.answer("📜 CGU...")
 
     if cible == "verifier_abonnement":
         if uid != SUPER_ADMIN_ID and await est_abonne_canal(ctx, uid):
@@ -1130,31 +1196,44 @@ async def handle_moderation(query, ctx, parts):
         db.annonces.update_one({"_id": oid}, {"$set": update_fields})
         log_audit("ANNONCE_APPROUVEE", str(oid), query.from_user.id)
 
+        # ═══ CORRECTION v4.17 : Un filleul ne compte qu'UNE SEULE fois (1ère annonce approuvée) ═══
         parrain = v.get("parrain")
         if parrain and parrain != item["vendeur_id"]:
-            filleuls_qualifies = db.users.find_one_and_update(
-                {"_id": parrain},
-                {"$inc": {"filleuls_qualifies": 1}},
-                return_document=True
-            )
-            if filleuls_qualifies and filleuls_qualifies.get("filleuls_qualifies", 0) % 5 == 0:
-                ticket = {
-                    "id": str(ObjectId()),
-                    "expiration": time.time() + 30*86400,
-                    "utilise": False
-                }
-                db.users.update_one({"_id": parrain}, {"$push": {"tickets": ticket}})
-                try:
-                    await ctx.bot.send_message(parrain,
-                        f"🎟️ <b>Ticket Sans Commission !</b>\nTu as parrainé 5 vendeurs actifs. "
-                        f"Utilisable pendant 30 jours sur une transaction Escrow.",
-                        parse_mode="HTML")
-                except Exception as e:
-                    log.warning(f"Notification ticket parrain {parrain}: {e}")
+            # Vérifier si c'est la PREMIÈRE annonce approuvée de ce vendeur
+            nb_avant = db.annonces.count_documents({
+                "vendeur_id": item["vendeur_id"],
+                "statut": "approuve",
+                "_id": {"$ne": oid}
+            })
+            if nb_avant == 0:
+                # Première annonce approuvée = ce filleul compte VRAIMENT
+                filleuls_qualifies = db.users.find_one_and_update(
+                    {"_id": parrain},
+                    {"$inc": {"filleuls_qualifies": 1}},
+                    return_document=True
+                )
+                if filleuls_qualifies and filleuls_qualifies.get("filleuls_qualifies", 0) % 5 == 0:
+                    ticket = {
+                        "id": str(ObjectId()),
+                        "expiration": time.time() + 30*86400,
+                        "utilise": False
+                    }
+                    db.users.update_one({"_id": parrain}, {"$push": {"tickets": ticket}})
+                    try:
+                        await ctx.bot.send_message(parrain,
+                            f"🎟️ <b>Ticket Sans Commission !</b>\nTu as parrainé 5 vendeurs actifs. "
+                            f"Utilisable pendant 30 jours sur une transaction Escrow.",
+                            parse_mode="HTML")
+                    except Exception as e:
+                        log.warning(f"Notification ticket parrain {parrain}: {e}")
         try:
             await ctx.bot.send_message(item["vendeur_id"], "🟢 Ton annonce a été validée et publiée !")
         except Exception as e:
             log.warning(f"Notification vendeur {item['vendeur_id']}: {e}")
+        # ═══ v4.17 : Notifier les utilisateurs ayant des alertes sur ce jeu ═══
+        await notifier_alertes_jeu(ctx, item.get("categorie", ""), str(oid))
+        # ═══ v4.17 : Attribuer des points au modérateur ═══
+        ton.ajouter_points_gerant(query.from_user.id, 10, "annonce_validee")
         await safe_edit(query, "🟢 Annonce validée et publiée.")
     else:
         db.annonces.update_one({"_id": oid}, {"$set": {"statut": "rejete"}})
@@ -1198,6 +1277,7 @@ async def handle_modification_annonce(query, ctx, parts):
             except Exception as e:
                 log.warning(f"Échec édition canal : {e}")
         log_audit("MODIF_ANNONCE_APPROUVEE", str(oid), query.from_user.id)
+        ton.ajouter_points_gerant(query.from_user.id, 5, "modification_validee")
         try: await ctx.bot.send_message(item["vendeur_id"], "✅ Ta modification a été approuvée et publiée !")
         except Exception as e: log.warning(f"Notification modif vendeur: {e}")
         await safe_edit(query, "✅ Modification approuvée et appliquée.")
@@ -1352,6 +1432,7 @@ async def handle_litige_action(query, ctx, uid, parts):
         faveur = "acheteur" if act == "faveur_ach" else "vendeur"
         db.litiges.update_one({"_id": oid}, {"$set": {"statut": "resolu", "faveur": faveur, "resolu_par": uid, "date_cloture": time.time()}})
         log_audit("LITIGE_RESOLU", f"{oid} en faveur {faveur}", uid)
+        ton.ajouter_points_gerant(uid, 20, "litige_resolu")
         await safe_edit(query, f"✅ Litige résolu en faveur {faveur}.")
         try: await ctx.bot.send_message(lit["demandeur_id"], f"⚖️ Ton litige a été résolu (en faveur : {faveur}).")
         except Exception as e: log.warning(f"Notification résolution litige: {e}")
@@ -1767,12 +1848,16 @@ async def handle_admin_action(query, ctx, uid, parts):
 
     elif act == "config_ton":
         if uid != SUPER_ADMIN_ID: return
+        taux_ton = cfg.get("taux_secours_ton_usd", 5.0)
+        taux_xof = cfg.get("taux_secours_usd_to_xof", 600.0)
         kb = [
             [InlineKeyboardButton(f"💼 Commission ({cfg.get('commission_pct')}%)", callback_data="admact:set_commission")],
             [InlineKeyboardButton(f"🔐 Seuil double validation ({cfg.get('seuil_double_validation_ton')} TON)", callback_data="admact:set_seuil")],
+            [InlineKeyboardButton(f"📊 Taux secours TON/USD ({taux_ton}$)", callback_data="admact:set_taux_ton")],
+            [InlineKeyboardButton(f"💱 Taux secours USD→XOF ({taux_xof} F)", callback_data="admact:set_taux_xof")],
             [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
         ]
-        await safe_edit(query, "💰 <b>Configuration TON</b>", InlineKeyboardMarkup(kb))
+        await safe_edit(query, "💰 <b>Configuration TON</b>\n\n<i>Les taux de secours sont utilisés quand les API (CoinGecko/Frankfurter) sont indisponibles.</i>", InlineKeyboardMarkup(kb))
 
     elif act == "gestion_wallets":
         if uid != SUPER_ADMIN_ID: return
@@ -1823,6 +1908,14 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "set_toncenter_key":
         save_user(uid, {"state": "ADMCFG_TONCENTER_KEY"})
         await safe_edit(query, "📡 <b>Clé API TonCenter</b>\n\nEntre ta clé API TonCenter (gratuite sur toncenter.com) :")
+
+    elif act == "set_taux_ton":
+        save_user(uid, {"state": "ADMCFG_TAUX_TON_USD"})
+        await safe_edit(query, "📊 <b>Taux de secours TON → USD</b>\n\nQuand CoinGecko est indisponible, 1 TON = X USD.\nValeur actuelle du marché : ~3-5$\nEntre la nouvelle valeur (ex: 3.5) :")
+
+    elif act == "set_taux_xof":
+        save_user(uid, {"state": "ADMCFG_TAUX_USD_XOF"})
+        await safe_edit(query, "💱 <b>Taux de secours USD → FCFA</b>\n\nQuand Frankfurter est indisponible, 1 USD = X FCFA.\nValeur standard : ~600 FCFA\nEntre la nouvelle valeur (ex: 620) :")
 
     elif act == "set_groupe_av":
         save_user(uid, {"state": "ADMCFG_GROUPE_AV"})
@@ -1946,6 +2039,7 @@ async def handle_moderation_demande(query, ctx, parts):
         try:
             await ctx.bot.send_message(PUBLIC_CHANNEL_ID, txt_pub, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_pub))
             db.demandes.update_one({"_id": oid}, {"$set": {"statut": "approuve"}})
+            ton.ajouter_points_gerant(query.from_user.id, 5, "demande_validee")
             await ctx.bot.send_message(demande["user_id"], "✅ Votre demande de compte a été validée et publiée sur le canal !")
             await query.message.edit_text("✅ Demande approuvée et publiée.")
         except Exception as e:
@@ -2239,7 +2333,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.15 démarré — scanner TON actif.")
+    log.info("✅ Bot Market Ultra v4.17 démarré — scanner TON actif.")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
