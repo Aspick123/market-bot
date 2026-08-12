@@ -1,10 +1,13 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║         BOT MARKET ULTRA v4.17 — BUGFIX + ANIMATIONS          ║
+║       BOT MARKET ULTRA v4.18 — ÉVALUATIONS + CONFORT          ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.17 – Parrainage, alertes, points équipe corrigés + animations menu
+v4.18 – Évaluations vendeurs après transaction, limite photos configurable
+- Recherche avec boutons Acheter, gestion des alertes, dashboard stats admin
+- Nettoyage automatique des annonces expirées et brouillons abandonnés
+- v4.17 – Parrainage, alertes, points équipe corrigés + animations menu
 - Taux de secours TON ajoutés dans Config TON (modifiables)
 - v4.16 – GIFs, stickers & vocaux autorisés dans le groupe
 - Wallets TON gérables via le menu admin (plus besoin de Render env vars)
@@ -100,6 +103,7 @@ DEFAULTS_CONFIG = {
     "moderation_auto_canal": True,
     "groupe_max_avertissements": 3,
     "groupe_duree_mute_heures": 24,
+    "limite_photos_annonce": 5,
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -395,7 +399,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.17</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.18</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -412,12 +416,11 @@ async def executer_tunnel_vente_depuis_callback(query, ctx, uid):
     if not ann:
         db.annonces.insert_one({"vendeur_id": uid, "statut": "brouillon", "photos": [], "booste": False, "date_creation": time.time()})
         save_user(uid, {"state": "VENTE_JEU"})
-        await query.message.reply_text(
-            "🎮 <b>Étape 1/7 : Nom du Jeu</b>\n\nQuel est le nom exact du jeu vidéo ?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")]]))
+        await _envoyer_etape(query.message, ctx, uid, 1, "Nom du Jeu",
+            "🎮 Quel est le nom exact du jeu vidéo ?",
+            kb=[[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")]])
     else:
-        await query.message.reply_text("Tu as déjà un brouillon en cours. Continue ou annule.")
+        await query.message.reply_text("📝 Tu as déjà un brouillon en cours. Continue ou annule.")
 
 # ══════════════════════════════════════════════════════════════
 #  COMMANDE /start (avec traitement immédiat de l'achat si vérifié)
@@ -532,7 +535,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
 
 # ══════════════════════════════════════════════════════════════
-#  TUNNEL DE VENTE (photo obligatoire)
+#  TUNNEL DE VENTE (photo obligatoire) — v4.18 FLUIDE
 # ══════════════════════════════════════════════════════════════
 
 LIMITES = {
@@ -542,70 +545,118 @@ LIMITES = {
     "devise": 30,
 }
 
+# Barres de progression visuelles
+BARRES = {1: "⬜⬜⬜⬜⬜⬜⬜", 2: "🟩⬜⬜⬜⬜⬜⬜", 3: "🟩🟩⬜⬜⬜⬜⬜", 4: "🟩🟩🟩⬜⬜⬜⬜",
+          5: "🟩🟩🟩🟩⬜⬜⬜", 6: "🟩🟩🟩🟩🟩⬜⬜", 7: "🟩🟩🟩🟩🟩🟩⬜"}
+
 def nettoyer_prix(texte):
     return ''.join(c for c in texte if c.isdigit() or c == '.')[:20]
+
+async def _nettoyer_ancien_message(ctx, uid):
+    """Supprime l'ancien message d'étape pour garder le chat propre."""
+    ancien_id = ctx.user_data.pop("tunnel_msg_id", None)
+    if ancien_id:
+        try:
+            await ctx.bot.delete_message(chat_id=uid, message_id=ancien_id)
+        except Exception:
+            pass  # Message déjà supprimé ou introuvable
+
+async def _envoyer_etape(message, ctx, uid, etape, titre, texte, kb=None):
+    """Envoie une étape du tunnel avec barre de progression et nettoie la précédente."""
+    await _nettoyer_ancien_message(ctx, uid)
+    barre = BARRES.get(etape, "🟩🟩🟩🟩🟩🟩🟩")
+    msg = await message.reply_text(
+        f"{barre}\n<b>Étape {etape}/7 : {titre}</b>\n\n{texte}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(kb) if kb else None
+    )
+    ctx.user_data["tunnel_msg_id"] = msg.message_id
+    return msg
 
 async def executer_tunnel_vente(update, ctx, uid, text=None, photo_id=None, album_photos=None):
     u = get_user(uid)
     state = u.get("state", "IDLE")
     ann = db.annonces.find_one({"vendeur_id": uid, "statut": "brouillon"})
+    message = update.effective_message
 
     if not ann:
         db.annonces.insert_one({"vendeur_id": uid, "statut": "brouillon", "photos": [], "booste": False, "date_creation": time.time()})
         save_user(uid, {"state": "VENTE_JEU"})
-        await update.effective_message.reply_text(
-            "🎮 <b>Étape 1/7 : Nom du Jeu</b>\n\nQuel est le nom exact du jeu vidéo ?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")]]))
+        await _envoyer_etape(message, ctx, uid, 1, "Nom du Jeu",
+            "🎮 Quel est le nom exact du jeu vidéo ?",
+            kb=[[InlineKeyboardButton("❌ Annuler", callback_data="nav:annuler_vente")]])
         return
 
     if state == "VENTE_JEU" and text:
         if len(text) > LIMITES["categorie"]:
-            await update.effective_message.reply_text(f"⚠️ Maximum {LIMITES['categorie']} caractères.")
+            await message.reply_text(f"⚠️ Maximum {LIMITES['categorie']} caractères.")
             return
         db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"categorie": text}})
         save_user(uid, {"state": "VENTE_PLATEFORME"})
         kb = [[InlineKeyboardButton(p, callback_data=f"plat:{p}") for p in ["Android", "iOS", "PC", "Console"]]]
-        await update.effective_message.reply_text("📱 <b>Étape 2/7 : Plateforme</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        await _envoyer_etape(message, ctx, uid, 2, "Plateforme",
+            f"✅ Jeu : <b>{safe_html(text)}</b>\n\n📱 Sur quelle plateforme est le compte ?", kb=kb)
 
     elif state == "VENTE_DESC" and text:
         if len(text) > LIMITES["description"]:
-            await update.effective_message.reply_text(f"⚠️ Maximum {LIMITES['description']} caractères.")
+            await message.reply_text(f"⚠️ Maximum {LIMITES['description']} caractères.")
             return
         db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"description": text}})
         save_user(uid, {"state": "VENTE_PHOTOS"})
-        await update.effective_message.reply_text(
-            "📸 <b>Étape 4/7 : Photos</b>\n\nEnvoyez vos photos puis cliquez Terminer. ⚠️ Au moins une photo est obligatoire.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏁 Terminer", callback_data="plat:fin_photos")]]))
+        cfg = get_config()
+        limite = cfg.get("limite_photos_annonce", 5)
+        await _envoyer_etape(message, ctx, uid, 4, "Photos",
+            f"✅ Description enregistrée.\n\n📸 Envoyez vos photos (max {limite}).\n⚠️ Au moins 1 photo obligatoire.",
+            kb=[[InlineKeyboardButton("🏁 Terminer", callback_data="plat:fin_photos")]])
 
     elif state == "VENTE_PHOTOS":
+        cfg = get_config()
+        limite = cfg.get("limite_photos_annonce", 5)
+        nb_actuelles = len(ann.get("photos", []))
         if photo_id:
+            if nb_actuelles >= limite:
+                await message.reply_text(f"⚠️ Limite de {limite} photos atteinte. Cliquez sur 🏁 Terminer.")
+                return
             db.annonces.update_one({"_id": ann["_id"]}, {"$push": {"photos": photo_id}})
-            await update.effective_message.reply_text("✅ Photo ajoutée.")
+            await message.reply_text(f"📸 Photo ajoutée ({nb_actuelles+1}/{limite}). Continuez ou cliquez Terminer.")
         elif album_photos:
-            db.annonces.update_one({"_id": ann["_id"]}, {"$push": {"photos": {"$each": album_photos}}})
-            await update.effective_message.reply_text(f"✅ {len(album_photos)} photo(s) ajoutée(s).")
+            restant = limite - nb_actuelles
+            ajouts = album_photos[:restant]
+            if ajouts:
+                db.annonces.update_one({"_id": ann["_id"]}, {"$push": {"photos": {"$each": ajouts}}})
+            if restant < len(album_photos):
+                await message.reply_text(f"⚠️ Limite de {limite} photos. Seules {len(ajouts)} ont été ajoutées.")
+            else:
+                await message.reply_text(f"📸 {len(ajouts)} photo(s) ajoutée(s). Continuez ou cliquez Terminer.")
 
     elif state == "VENTE_PRIX" and text:
         prix_nettoye = nettoyer_prix(text)
         if not prix_nettoye:
-            await update.effective_message.reply_text("⚠️ Prix invalide (chiffres uniquement).")
+            await message.reply_text("⚠️ Prix invalide (chiffres uniquement).")
             return
         db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"prix": prix_nettoye}})
         save_user(uid, {"state": "VENTE_DEVISE"})
-        await update.effective_message.reply_text("💱 <b>Étape 6/7 : Devise</b>", parse_mode="HTML")
+        await _envoyer_etape(message, ctx, uid, 6, "Devise",
+            f"✅ Prix : <b>{prix_nettoye}</b>\n\n💱 Dans quelle devise ? (ex: FCFA, EUR, USD)", kb=None)
 
     elif state == "VENTE_DEVISE" and text:
         if len(text) > LIMITES["devise"]:
-            await update.effective_message.reply_text(f"⚠️ Maximum {LIMITES['devise']} caractères.")
+            await message.reply_text(f"⚠️ Maximum {LIMITES['devise']} caractères.")
             return
         db.annonces.update_one({"_id": ann["_id"]}, {"$set": {"devise": text, "statut": "en_attente", "date_depot": time.time()}})
         save_user(uid, {"state": "IDLE"})
-        await soumettre_a_moderation(update.effective_message, ctx, ann["_id"])
+        await _nettoyer_ancien_message(ctx, uid)
+        await message.reply_text(
+            f"✅ <b>Annonce complète !</b>\n\n"
+            f"🎮 {safe_html(ann.get('categorie','?'))}\n"
+            f"📱 {safe_html(ann.get('plateforme','?'))}\n"
+            f"💰 {safe_html(ann.get('prix','?'))} {safe_html(text)}\n\n"
+            f"⏳ Envoi à l'équipe pour validation...",
+            parse_mode="HTML")
+        await soumettre_a_moderation(message, ctx, ann["_id"])
     else:
         save_user(uid, {"state": "IDLE"})
-        await update.effective_message.reply_text("⚠️ Étape incohérente. Relance /start.")
+        await message.reply_text("⚠️ Étape incohérente. Relance /start.")
 
 async def soumettre_a_moderation(message, ctx, ann_id):
     ann = db.annonces.find_one({"_id": ann_id})
@@ -702,13 +753,20 @@ async def central_text_and_media_handler(update: Update, ctx: ContextTypes.DEFAU
         res = list(db.annonces.find({"statut": "approuve",
             "$or": [{"categorie": {"$regex": escaped_text, "$options": "i"}},
                     {"description": {"$regex": escaped_text, "$options": "i"}}]}))
-        kb = [[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
+        kb = []
         if not res:
+            kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
             await update.message.reply_text("🔍 Aucun résultat.", reply_markup=InlineKeyboardMarkup(kb))
         else:
-            txt = "🔍 <b>RÉSULTATS :</b>\n\n"
-            for item in res[:15]:
-                txt += f"🎮 <b>[{safe_html(item.get('categorie'))}]</b> - {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n\n"
+            txt = f"🔍 <b>RÉSULTATS ({len(res)}) :</b>\n\n"
+            for idx, item in enumerate(res[:10]):
+                categ = safe_html(item.get('categorie', '?'))
+                prix = safe_html(item.get('prix', '?'))
+                devise = safe_html(item.get('devise', '?'))
+                plateforme = safe_html(item.get('plateforme', '?'))
+                txt += f"{idx+1}. 🎮 <b>{categ}</b> — 💰 {prix} {devise} — 📱 {plateforme}\n\n"
+                kb.append([InlineKeyboardButton(f"🛒 {categ[:25]} ({prix} {devise})", callback_data=f"viewann:inspecte:{item['_id']}")])
+            kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
             await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
@@ -815,6 +873,7 @@ ADMCFG_FIELDS = {
     "ADMCFG_WALLET": ("admin_ton_wallet", str),
     "ADMCFG_GROUPE_AV": ("groupe_max_avertissements", int),
     "ADMCFG_GROUPE_MUTE": ("groupe_duree_mute_heures", int),
+    "ADMCFG_LIMITE_PHOTOS": ("limite_photos_annonce", int),
     "ADMCFG_TON_WALLET": ("ton_wallet_address", str),
     "ADMCFG_TON_PRIVATE_KEY": ("ton_private_key", str),
     "ADMCFG_TONCENTER_KEY": ("toncenter_api_key", str),
@@ -897,6 +956,8 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await handle_demande_plat(query, ctx, uid, parts)
         elif prefix == "modactdemande":
             await handle_moderation_demande(query, ctx, parts)
+        elif prefix == "evaluer":
+            await handle_evaluation(query, ctx, uid, parts)
     except Exception as e:
         log.error(f"Erreur callback '{data}' : {e}\n{traceback.format_exc()}")
         try:
@@ -996,7 +1057,8 @@ async def handle_nav(query, ctx, uid, u, parts):
     if cible == "annuler_vente":
         db.annonces.delete_one({"vendeur_id": uid, "statut": "brouillon"})
         save_user(uid, {"state": "IDLE"})
-        await safe_edit(query, "❌ Annulé.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
+        await _nettoyer_ancien_message(ctx, uid)
+        await safe_edit(query, "❌ Annonce annulée. Retour au menu.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
     elif cible == "recherche":
         save_user(uid, {"state": "RECHERCHE_INPUT"})
@@ -1097,8 +1159,33 @@ async def handle_nav(query, ctx, uid, u, parts):
         await safe_edit(query, txt, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
     elif cible == "mes_alertes":
-        db.alertes.update_one({"user_id": uid}, {"$addToSet": {"jeux": "Tous"}}, upsert=True)
-        await safe_edit(query, "🔔 Abonné aux alertes générales.\n/alerte [jeu] pour cibler.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
+        # ═══ v4.18 : Menu de gestion des alertes ═══
+        alerte_doc = db.alertes.find_one({"user_id": uid})
+        jeux = alerte_doc.get("jeux", []) if alerte_doc else []
+        if not jeux:
+            txt = "🔔 <b>MES ALERTES</b>\n\nAucune alerte configurée.\n\nUtilise /alerte [jeu] pour être notifié des nouvelles annonces."
+        else:
+            txt = f"🔔 <b>MES ALERTES</b> ({len(jeux)})\n\n"
+            for j in jeux:
+                txt += f"• {safe_html(j)}\n"
+            txt += "\nClique sur une alerte pour la supprimer."
+        kb = []
+        for j in jeux[:10]:
+            kb.append([InlineKeyboardButton(f"🗑️ Supprimer « {safe_html(j)[:25]} »", callback_data=f"nav:suppr_alerte:{j}")])
+        kb.append([InlineKeyboardButton("➕ Ajouter une alerte", callback_data="nav:ajouter_alerte")])
+        kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif cible == "suppr_alerte":
+        jeu_a_supprimer = ":".join(parts[2:]) if len(parts) > 2 else parts[2]
+        db.alertes.update_one({"user_id": uid}, {"$pull": {"jeux": jeu_a_supprimer}})
+        await query.answer(f"🗑️ Alerte « {jeu_a_supprimer[:20]} » supprimée !")
+        # Re-afficher le menu des alertes
+        await handle_nav(query, ctx, uid, u, ["nav", "mes_alertes"])
+
+    elif cible == "ajouter_alerte":
+        save_user(uid, {"state": "RECHERCHE_INPUT"})
+        await safe_edit(query, "🔔 Entre le nom du jeu pour lequel tu veux être alerté :", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]))
 
     elif cible == "mes_litiges":
         save_user(uid, {"state": "LITIGE_INPUT_RECOURS"})
@@ -1149,11 +1236,25 @@ async def handle_plat(query, ctx, uid, parts):
             await query.answer("⚠️ Vous devez ajouter au moins une photo.", show_alert=True)
             return
         save_user(uid, {"state": "VENTE_PRIX"})
-        await safe_edit(query, "💰 <b>Étape 5/7 : Prix</b>\n\nMontant (ex: 15000, 25, 100) :")
+        await _nettoyer_ancien_message(ctx, uid)
+        await _envoyer_etape(query.message, ctx, uid, 5, "Prix",
+            f"📸 {len(ann.get('photos',[]))} photo(s) enregistrée(s).\n\n💰 Quel est le prix du compte ?\n(ex: 15000, 25, 100)",
+            kb=None)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
     else:
         db.annonces.update_one({"vendeur_id": uid, "statut": "brouillon"}, {"$set": {"plateforme": action}})
         save_user(uid, {"state": "VENTE_DESC"})
-        await safe_edit(query, "📝 <b>Étape 3/7 : Description</b>\n\nDécrivez le compte :")
+        await _nettoyer_ancien_message(ctx, uid)
+        await _envoyer_etape(query.message, ctx, uid, 3, "Description",
+            f"✅ Plateforme : <b>{safe_html(action)}</b>\n\n📝 Décrivez le compte à vendre :\n(niveau, skins, rang, etc.)",
+            kb=None)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
 
 # ──────────────── MODÉRATION (avec lien contact direct) ────────────────
 
@@ -1503,7 +1604,8 @@ async def afficher_admin_root(query, ctx, uid, u):
         f"📋 Annonces en attente : {nb_attente}\n"
         f"✏️ Modifications en attente : {nb_modif}\n"
         f"⚖️ Litiges ouverts : {nb_litiges}\n"
-        f"🎯 Candidatures en attente : {nb_cand}\n"
+        f"🎯 Candidatures en attente : {nb_cand}\n\n"
+        f"📊 <i>Dashboard disponible pour les admins</i>"
     )
     kb = [
         [InlineKeyboardButton("📋 Annonces en attente", callback_data="admact:voir_attente"),
@@ -1514,6 +1616,7 @@ async def afficher_admin_root(query, ctx, uid, u):
     if has_level(uid, u, "admin"):
         kb.append([InlineKeyboardButton("🚫 Gérer Blacklist", callback_data="admact:gerer_blacklist")])
         kb.append([InlineKeyboardButton("🎯 Candidatures", callback_data="admact:voir_candidatures")])
+        kb.append([InlineKeyboardButton("📊 Dashboard Stats", callback_data="admact:dashboard")])
     if get_role(uid, u) == "superadmin":
         kb.append([InlineKeyboardButton("🔄 Recrutement", callback_data="admact:toggle_rec"),
                    InlineKeyboardButton("🚨 Urgence", callback_data="admact:toggle_urg")])
@@ -1823,6 +1926,7 @@ async def handle_admin_action(query, ctx, uid, parts):
         if uid != SUPER_ADMIN_ID: return
         kb = [
             [InlineKeyboardButton(f"📋 Limite annonces ({cfg.get('limite_annonces_membre')})", callback_data="admact:set_limite")],
+            [InlineKeyboardButton(f"📸 Limite photos ({cfg.get('limite_photos_annonce', 5)})", callback_data="admact:set_limite_photos")],
             [InlineKeyboardButton(f"⏱️ Délai anti-arnaque ({cfg.get('delai_anti_arnaque')}s)", callback_data="admact:set_delai")],
             [InlineKeyboardButton(f"🔧 Config Groupe ▼", callback_data="admact:config_groupe")],
             [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
@@ -1841,6 +1945,10 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "set_limite":
         save_user(uid, {"state": "ADMCFG_LIMITE"})
         await safe_edit(query, "📋 Nouvelle limite d'annonces par membre :")
+
+    elif act == "set_limite_photos":
+        save_user(uid, {"state": "ADMCFG_LIMITE_PHOTOS"})
+        await safe_edit(query, "📸 Nombre maximum de photos par annonce (défaut: 5) :")
 
     elif act == "set_delai":
         save_user(uid, {"state": "ADMCFG_DELAI"})
@@ -1924,6 +2032,46 @@ async def handle_admin_action(query, ctx, uid, parts):
     elif act == "set_groupe_mute":
         save_user(uid, {"state": "ADMCFG_GROUPE_MUTE"})
         await safe_edit(query, "⏳ Durée de la sourdine en heures (défaut: 24) :")
+
+    elif act == "dashboard":
+        if not has_level(uid, u, "admin"):
+            await query.answer("🚫 Réservé Admin+.", show_alert=True); return
+        now = time.time()
+        debut_mois = now - 30*86400
+        debut_semaine = now - 7*86400
+        nb_users = db.users.count_documents({})
+        nb_new_users = db.users.count_documents({"date_inscription": {"$gte": debut_semaine}})
+        nb_annonces_actives = db.annonces.count_documents({"statut": "approuve"})
+        nb_ventes_mois = db.annonces.count_documents({"statut": "vendu", "date_depot": {"$gte": debut_mois}})
+        nb_escrows_actifs = db.escrows.count_documents({"statut": {"$in": ["attente_paiement", "fonds_bloques", "acces_envoyes", "litige"]}})
+        nb_escrows_termines = db.escrows.count_documents({"statut": "libere"})
+        # Total TON en escrow actif
+        escrows_actifs = list(db.escrows.find({"statut": {"$in": ["attente_paiement", "fonds_bloques", "acces_envoyes", "litige"]}}))
+        total_ton = round(sum(e.get("montant_ton", 0) for e in escrows_actifs), 4)
+        nb_litiges_ouverts = db.litiges.count_documents({"statut": "ouvert"})
+        nb_blacklist = db.blacklist.count_documents({})
+        txt = (
+            f"📊 <b>DASHBOARD STATISTIQUES</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            f"👥 <b>Membres</b>\n"
+            f"• Total : {nb_users}\n"
+            f"• Nouveaux (7j) : {nb_new_users}\n\n"
+            f"📦 <b>Annonces</b>\n"
+            f"• Actives : {nb_annonces_actives}\n"
+            f"• Ventes (30j) : {nb_ventes_mois}\n\n"
+            f"🔒 <b>Escrow TON</b>\n"
+            f"• Actifs : {nb_escrows_actifs}\n"
+            f"• Terminés : {nb_escrows_termines}\n"
+            f"• Volume bloqué : {total_ton} TON\n\n"
+            f"⚖️ <b>Sécurité</b>\n"
+            f"• Litiges ouverts : {nb_litiges_ouverts}\n"
+            f"• Blacklistés : {nb_blacklist}\n"
+        )
+        kb = [
+            [InlineKeyboardButton("🔄 Actualiser", callback_data="admact:dashboard")],
+            [InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]
+        ]
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
     elif act == "audit_log":
         if uid != SUPER_ADMIN_ID: return
@@ -2254,6 +2402,60 @@ async def handle_admin_states(update, ctx, uid, state, text):
     return False
 
 # ══════════════════════════════════════════════════════════════
+#  SYSTÈME D'ÉVALUATION DES VENDEURS — v4.18
+# ══════════════════════════════════════════════════════════════
+
+async def envoyer_prompt_evaluation(bot, acheteur_id: int, vendeur_id: int, escrow_id):
+    """Envoie un message à l'acheteur pour noter le vendeur après une transaction réussie."""
+    stars_kb = []
+    row = []
+    for note in range(1, 6):
+        row.append(InlineKeyboardButton("⭐" * note, callback_data=f"evaluer:{note}:{vendeur_id}:{escrow_id}"))
+    stars_kb.append(row)
+    try:
+        await bot.send_message(acheteur_id,
+            f"⭐ <b>Évalue ta transaction !</b>\n\n"
+            f"Quelle note donnes-tu au vendeur ?\n"
+            f"De 1⭐ (mauvais) à 5⭐ (excellent)",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(stars_kb))
+    except Exception as e:
+        log.warning(f"Échec envoi prompt évaluation à {acheteur_id}: {e}")
+
+async def handle_evaluation(query, ctx, uid, parts):
+    """Traite la note donnée par l'acheteur."""
+    try:
+        note = int(parts[1])
+        vendeur_id = int(parts[2])
+        escrow_id = parts[3]
+    except (IndexError, ValueError):
+        await query.answer("❌ Erreur.", show_alert=True)
+        return
+    if note < 1 or note > 5:
+        await query.answer("❌ Note invalide.", show_alert=True)
+        return
+    # Enregistrer l'évaluation
+    evaluation = {
+        "note": note,
+        "de": uid,
+        "escrow_id": escrow_id,
+        "date": fmt_date()
+    }
+    db.users.update_one({"_id": vendeur_id}, {"$push": {"evaluations": evaluation}})
+    log_audit("EVALUATION", f"Vendeur {vendeur_id} noté {note}⭐ par {uid}", uid)
+    await query.answer(f"✅ Note {note}⭐ enregistrée !", show_alert=True)
+    try:
+        await query.message.edit_text(f"⭐ <b>Merci pour ton évaluation !</b>\n\nTu as donné {note}⭐ au vendeur.", parse_mode="HTML")
+    except Exception as e:
+        log.warning(f"Échec édition message évaluation: {e}")
+    # Notifier le vendeur
+    try:
+        await ctx.bot.send_message(vendeur_id,
+            f"⭐ <b>Nouvelle évaluation reçue !</b>\n\nUn acheteur t'a donné {note}⭐ après une transaction.",
+            parse_mode="HTML")
+    except Exception as e:
+        log.warning(f"Notification évaluation vendeur {vendeur_id}: {e}")
+
+# ══════════════════════════════════════════════════════════════
 #  GESTIONNAIRE D'ERREURS GLOBAL AMÉLIORÉ
 # ══════════════════════════════════════════════════════════════
 
@@ -2297,6 +2499,32 @@ async def job_notif_tickets(ctx: ContextTypes.DEFAULT_TYPE):
                     log.warning(f"Échec rappel ticket pour {u['_id']}: {e}")
 
 # ══════════════════════════════════════════════════════════════
+#  NETTOYAGE AUTOMATIQUE — v4.18
+# ══════════════════════════════════════════════════════════════
+
+async def job_nettoyage_auto(ctx: ContextTypes.DEFAULT_TYPE):
+    """Supprime les brouillons abandonnés (7j) et les annonces expirées (90j)."""
+    maintenant = time.time()
+    # Brouillons de plus de 7 jours
+    seuil_brouillon = maintenant - 7*86400
+    brouillons = db.annonces.delete_many({
+        "statut": "brouillon",
+        "date_creation": {"$lt": seuil_brouillon}
+    })
+    if brouillons.deleted_count > 0:
+        log_audit("NETTOYAGE_BROUILLONS", f"{brouillons.deleted_count} supprimés", 0)
+        log.info(f"🧹 {brouillons.deleted_count} brouillons abandonnés supprimés.")
+    # Annonces expirées/rejetées de plus de 90 jours
+    seuil_expire = maintenant - 90*86400
+    expires = db.annonces.delete_many({
+        "statut": {"$in": ["expire", "rejete"]},
+        "date_depot": {"$lt": seuil_expire}
+    })
+    if expires.deleted_count > 0:
+        log_audit("NETTOYAGE_EXPIRES", f"{expires.deleted_count} supprimés", 0)
+        log.info(f"🧹 {expires.deleted_count} annonces expirées/rejetées supprimées (90j+).")
+
+# ══════════════════════════════════════════════════════════════
 #  POST INIT / SHUTDOWN
 # ══════════════════════════════════════════════════════════════
 
@@ -2333,7 +2561,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.17 démarré — scanner TON actif.")
+    log.info("✅ Bot Market Ultra v4.18 démarré — scanner TON + nettoyage auto actifs.")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
@@ -2385,6 +2613,7 @@ def main():
             app.job_queue.run_repeating(job_resume_hebdo, interval=604800, first=60)
         app.job_queue.run_repeating(job_notif_tickets, interval=86400, first=3600)
         app.job_queue.run_repeating(job_rappel_annonces, interval=3600, first=600)
+        app.job_queue.run_repeating(job_nettoyage_auto, interval=86400, first=3600)  # v4.18 : nettoyage quotidien
 
     log.info("🚀 Lancement du polling Telegram...")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)

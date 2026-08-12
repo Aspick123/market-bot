@@ -3,7 +3,7 @@
 ║                  ESCROW_TON.PY v4.2                             ║
 ║  Séquestre TON complet : memo, scan blockchain, conversion   ║
 ║  live, commission auto, double validation, reçus, paie équipe║
-║  v4.2 – Wallets lisibles depuis la config DB (plus d'env vars)║
+║  v4.2 – Wallets DB + prompt évaluation après transaction       ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Correctifs de sécurité v4.1 (audit) :
@@ -563,6 +563,17 @@ async def liberer_fonds(bot, escrow_id, esc: dict):
             await bot.send_message(esc["vendeur_id"],
                 f"🎉 <b>Vente confirmée !</b>\n\n✅ {montant_vendeur} TON envoyés.\n💼 Commission : {commission} TON",
                 parse_mode="HTML")
+            # ═══ v4.18 : Envoyer le prompt d'évaluation à l'acheteur ═══
+            stars_kb = []
+            row = []
+            for note in range(1, 6):
+                row.append(InlineKeyboardButton("⭐" * note, callback_data=f"evaluer:{note}:{esc['vendeur_id']}:{escrow_id}"))
+            stars_kb.append(row)
+            await bot.send_message(esc["acheteur_id"],
+                f"⭐ <b>Évalue ta transaction !</b>\n\n"
+                f"Quelle note donnes-tu au vendeur ?\n"
+                f"De 1⭐ (mauvais) à 5⭐ (excellent)",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(stars_kb))
         except Exception as e:
             log.warning(f"Notification finale échouée : {e}")
     else:
