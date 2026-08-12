@@ -756,7 +756,23 @@ async def generer_recu(bot, escrow_id, esc: dict, montant_total, montant_vendeur
 #  RÉMUNÉRATION ÉQUIPE — inchangé
 # ══════════════════════════════════════════════════════════════
 
+# Mapping action → clé de config pour le nombre de points
+POINTS_PAR_ACTION = {
+    "annonce_validee": "points_annonce_validee",
+    "litige_resolu": "points_litige_resolu",
+    "modification_validee": "points_modification_validee",
+    "demande_validee": "points_demande_validee",
+}
+
 def ajouter_points_gerant(gerant_id: int, points: int, action: str):
+    """Attribue des points à un gérant si la rémunération est active.
+    Le nombre de points peut être forcé (paramètre) ou lu depuis la config."""
+    cfg = get_escrow_config()
+    if not cfg.get("remuneration_active", True):
+        return  # Rémunération désactivée → aucun point attribué
+    if points is None or points <= 0:
+        key = POINTS_PAR_ACTION.get(action)
+        points = cfg.get(key, 10) if key else 10
     db.team_stats.update_one(
         {"_id": gerant_id},
         {"$inc": {"points_mois": points, "points_total": points, f"actions.{action}": 1}},
@@ -764,17 +780,34 @@ def ajouter_points_gerant(gerant_id: int, points: int, action: str):
     )
 
 async def afficher_rapport_remuneration(message):
+    cfg = get_escrow_config()
+    taux = cfg.get("remuneration_ton_par_point", 0.05)
+    salaires = cfg.get("salaires_fixes", {})
     stats = list(db.team_stats.find({}))
     if not stats:
         await message.reply_text("📊 Aucune statistique d'équipe pour le moment.")
         return
-    txt = "💰 <b>RAPPORT RÉMUNÉRATION ÉQUIPE</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+    txt = (
+        f"💰 <b>RAPPORT RÉMUNÉRATION ÉQUIPE</b>\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        f"⚙️ Taux : 1 point = {taux} TON\n\n"
+    )
     kb = []
     for s in stats:
         gid = s["_id"]
         pts = s.get("points_mois", 0)
-        txt += f"👤 <code>{gid}</code> — {pts} pts ce mois\n"
-        kb.append([InlineKeyboardButton(f"💸 Payer {gid} ({pts} pts)", callback_data=f"tonact:payer_gerant:{gid}")])
+        user = db.users.find_one({"_id": gid}) or {}
+        nom = user.get("first_name", "") or user.get("username", str(gid))
+        salaire = salaires.get(str(gid), 0)
+        montant_points = round(pts * taux, 2)
+        total_du = round(montant_points + salaire, 2)
+        txt += (
+            f"👤 <b>{safe_html(nom)}</b> (<code>{gid}</code>)\n"
+            f"   ⚡ {pts} pts → {montant_points} TON\n"
+            f"   💼 Salaire fixe : {salaire} TON\n"
+            f"   💰 Total dû : <b>{total_du} TON</b>\n\n"
+        )
+        kb.append([InlineKeyboardButton(f"💸 Payer {safe_html(nom)[:15]} ({total_du} TON)", callback_data=f"tonact:payer_gerant:{gid}")])
     await message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 async def payer_gerant(bot, gerant_id: int, montant_ton: float, super_admin_id):
@@ -785,6 +818,14 @@ async def payer_gerant(bot, gerant_id: int, montant_ton: float, super_admin_id):
     success = await envoyer_ton(wallet, montant_ton, "Rémunération équipe")
     if success:
         db.team_stats.update_one({"_id": gerant_id}, {"$set": {"points_mois": 0}})
+        # ═══ v4.19 : Enregistrer le paiement dans l'historique ═══
+        db.team_paiements.insert_one({
+            "gerant_id": gerant_id,
+            "montant_ton": montant_ton,
+            "date": fmt_date(),
+            "timestamp": time.time(),
+            "paye_par": super_admin_id
+        })
         log_audit("PAIEMENT_EQUIPE", f"{gerant_id} — {montant_ton} TON", super_admin_id)
         try:
             await bot.send_message(gerant_id, f"💸 Tu as reçu {montant_ton} TON pour ton travail ce mois !")

@@ -1,10 +1,14 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║       BOT MARKET ULTRA v4.18 — ÉVALUATIONS + CONFORT          ║
+║   BOT MARKET ULTRA v4.20 — CERTIFICATION + VÉRIF DISPO        ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.18 – Évaluations vendeurs après transaction, limite photos configurable
+v4.20 – Certification des vendeurs de confiance + vérification disponibilité (Direct)
+- v4.19 – Gestion d'équipe complète : rémunération hybride (points + salaire fixe)
+- Interrupteur ON/OFF, dashboard équipe, historique paiements, reset mensuel
+- Wallet TON obligatoire pour publier une annonce
+- v4.18 – Évaluations vendeurs après transaction, limite photos configurable
 - Recherche avec boutons Acheter, gestion des alertes, dashboard stats admin
 - Nettoyage automatique des annonces expirées et brouillons abandonnés
 - v4.17 – Parrainage, alertes, points équipe corrigés + animations menu
@@ -81,6 +85,7 @@ DEFAULTS_USER = {
     "filleuls_qualifies": 0,
     "cgu_acceptees": False,
     "evaluations": [],
+    "certifie": False,
 }
 
 DEFAULTS_CONFIG = {
@@ -104,6 +109,14 @@ DEFAULTS_CONFIG = {
     "groupe_max_avertissements": 3,
     "groupe_duree_mute_heures": 24,
     "limite_photos_annonce": 5,
+    "remuneration_active": True,
+    "remuneration_ton_par_point": 0.05,
+    "points_annonce_validee": 10,
+    "points_litige_resolu": 20,
+    "points_modification_validee": 5,
+    "points_demande_validee": 5,
+    "salaires_fixes": {},
+    "dernier_reset_remuneration": "",
 }
 
 if not db.config.find_one({"type": "global"}):
@@ -399,7 +412,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.18</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.20</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -879,9 +892,39 @@ ADMCFG_FIELDS = {
     "ADMCFG_TONCENTER_KEY": ("toncenter_api_key", str),
     "ADMCFG_TAUX_TON_USD": ("taux_secours_ton_usd", float),
     "ADMCFG_TAUX_USD_XOF": ("taux_secours_usd_to_xof", float),
+    "ADMCFG_TON_PAR_POINT": ("remuneration_ton_par_point", float),
+    "ADMCFG_PTS_ANNONCE": ("points_annonce_validee", int),
+    "ADMCFG_PTS_LITIGE": ("points_litige_resolu", int),
+    "ADMCFG_PTS_MODIF": ("points_modification_validee", int),
+    "ADMCFG_PTS_DEMANDE": ("points_demande_validee", int),
 }
 
 async def traiter_config_admin(update, ctx, state, text):
+    # ═══ v4.19 : Gestion spéciale du salaire fixe (dict imbriqué) ═══
+    if state == "ADMCFG_SALAIRE":
+        try:
+            montant = float(text.replace(",", "."))
+        except Exception:
+            await update.message.reply_text("⚠️ Montant invalide.")
+            return
+        target = ctx.user_data.get("salaire_target")
+        if not target:
+            await update.message.reply_text("⚠️ Erreur : membre introuvable.")
+            save_user(update.effective_user.id, {"state": "IDLE"})
+            return
+        cfg = get_config()
+        salaires = dict(cfg.get("salaires_fixes", {}))
+        if montant <= 0:
+            salaires.pop(str(target), None)
+        else:
+            salaires[str(target)] = montant
+        db.config.update_one({"type": "global"}, {"$set": {"salaires_fixes": salaires}})
+        log_audit("SALAIRE_FIXE", f"{target} = {montant} TON", update.effective_user.id)
+        save_user(update.effective_user.id, {"state": "IDLE"})
+        ctx.user_data.pop("salaire_target", None)
+        await update.message.reply_text(f"✅ Salaire fixe mis à jour : {montant} TON/mois pour {target}.")
+        return
+
     if state not in ADMCFG_FIELDS:
         return
     key, caster = ADMCFG_FIELDS[state]
@@ -958,6 +1001,8 @@ async def central_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             await handle_moderation_demande(query, ctx, parts)
         elif prefix == "evaluer":
             await handle_evaluation(query, ctx, uid, parts)
+        elif prefix == "dispo":
+            await handle_dispo_callback(query, ctx, uid, parts)
     except Exception as e:
         log.error(f"Erreur callback '{data}' : {e}\n{traceback.format_exc()}")
         try:
@@ -1065,6 +1110,16 @@ async def handle_nav(query, ctx, uid, u, parts):
         await safe_edit(query, "🔍 Mot-clé recherché :", InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]]))
 
     elif cible == "vendre":
+        # ═══ v4.19 : Wallet TON obligatoire pour vendre ═══
+        if not u.get("wallet_ton") or not ton.WALLET_TON_PATTERN.match(u.get("wallet_ton", "")):
+            kb_wallet = [[InlineKeyboardButton("💼 Configurer mon Wallet TON", callback_data="setprof:WALLET_TON")],
+                         [InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")]]
+            await safe_edit(query,
+                "⚠️ <b>Wallet TON requis</b>\n\n"
+                "Pour vendre un compte et recevoir tes paiements via Escrow, tu dois d'abord renseigner un wallet TON valide.\n\n"
+                "C'est l'adresse où tu recevras l'argent de tes ventes.",
+                InlineKeyboardMarkup(kb_wallet))
+            return
         if get_role(uid, u) == "membre":
             anciennete = time.time() - u.get("date_inscription", time.time())
             delai = cfg.get("delai_anti_arnaque", 3600)
@@ -1102,9 +1157,11 @@ async def handle_nav(query, ctx, uid, u, parts):
             stars = "⭐" * int(moyenne) + f" ({moyenne}/5 - {len(evals)} avis)"
         else:
             stars = "ℹ️ Aucun avis"
+        certif_badge = "🔷 <b>Vendeur certifié</b>\n" if u.get("certifie", False) else ""
         txt = (
             f"👤 <b>VOTRE PROFIL</b>\n\n🆔 <code>{uid}</code>\n"
             f"🎭 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
+            f"{certif_badge}"
             f"🌍 {safe_html(u.get('nationalite'))}\n"
             f"📞 {safe_html(u.get('telephone') or 'Non configuré')} ({safe_html(u.get('tel_visibilite'))})\n"
             f"⏰ {safe_html(u.get('plage_horaire'))}\n"
@@ -1271,10 +1328,11 @@ async def handle_moderation(query, ctx, parts):
         if not item: return
         v = get_user(item["vendeur_id"])
         bot_username = (await ctx.bot.get_me()).username
+        badge = " 🔷 <b>Vendeur certifié</b>" if v.get("certifie", False) else ""
         txt_pub = (
             f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(item.get('categorie','').replace(' ', '_'))}\n"
             f"📱 <code>{safe_html(item.get('plateforme'))}</code>\n💰 <b>{safe_html(item.get('prix'))} {safe_html(item.get('devise'))}</b>\n"
-            f"📝 {safe_html(item.get('description',''))}\n\n👤 Vendeur : @{safe_html(v.get('username'))}"
+            f"📝 {safe_html(item.get('description',''))}\n\n👤 Vendeur : @{safe_html(v.get('username'))}{badge}"
         )
         kb_pub = [
             [InlineKeyboardButton("🛒 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")],
@@ -1334,7 +1392,7 @@ async def handle_moderation(query, ctx, parts):
         # ═══ v4.17 : Notifier les utilisateurs ayant des alertes sur ce jeu ═══
         await notifier_alertes_jeu(ctx, item.get("categorie", ""), str(oid))
         # ═══ v4.17 : Attribuer des points au modérateur ═══
-        ton.ajouter_points_gerant(query.from_user.id, 10, "annonce_validee")
+        ton.ajouter_points_gerant(query.from_user.id, 0, "annonce_validee")
         await safe_edit(query, "🟢 Annonce validée et publiée.")
     else:
         db.annonces.update_one({"_id": oid}, {"$set": {"statut": "rejete"}})
@@ -1378,7 +1436,7 @@ async def handle_modification_annonce(query, ctx, parts):
             except Exception as e:
                 log.warning(f"Échec édition canal : {e}")
         log_audit("MODIF_ANNONCE_APPROUVEE", str(oid), query.from_user.id)
-        ton.ajouter_points_gerant(query.from_user.id, 5, "modification_validee")
+        ton.ajouter_points_gerant(query.from_user.id, 0, "modification_validee")
         try: await ctx.bot.send_message(item["vendeur_id"], "✅ Ta modification a été approuvée et publiée !")
         except Exception as e: log.warning(f"Notification modif vendeur: {e}")
         await safe_edit(query, "✅ Modification approuvée et appliquée.")
@@ -1533,7 +1591,7 @@ async def handle_litige_action(query, ctx, uid, parts):
         faveur = "acheteur" if act == "faveur_ach" else "vendeur"
         db.litiges.update_one({"_id": oid}, {"$set": {"statut": "resolu", "faveur": faveur, "resolu_par": uid, "date_cloture": time.time()}})
         log_audit("LITIGE_RESOLU", f"{oid} en faveur {faveur}", uid)
-        ton.ajouter_points_gerant(uid, 20, "litige_resolu")
+        ton.ajouter_points_gerant(uid, 0, "litige_resolu")
         await safe_edit(query, f"✅ Litige résolu en faveur {faveur}.")
         try: await ctx.bot.send_message(lit["demandeur_id"], f"⚖️ Ton litige a été résolu (en faveur : {faveur}).")
         except Exception as e: log.warning(f"Notification résolution litige: {e}")
@@ -1627,6 +1685,7 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("📊 Stats & Export", callback_data="admact:export_pdf")])
         kb.append([InlineKeyboardButton("📜 Audit Log", callback_data="admact:audit_log")])
         kb.append([InlineKeyboardButton("💸 Rémunération équipe", callback_data="tonact:rapport_remuneration")])
+        kb.append([InlineKeyboardButton("👥 Équipe & Rémunération", callback_data="admact:equipe")])
     kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
     await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
@@ -1656,9 +1715,10 @@ async def handle_members_page(query, ctx, uid, u, parts):
         role = memb.get("role", "membre")
         date_inscr = fmt_date(memb.get("date_inscription", 0))
         bl = "🚫" if is_blacklisted(mid) else ""
+        certif = "🔷" if memb.get("certifie", False) else ""
         infractions = db.infractions_canal.find_one({"user_id": mid})
         infra_str = f" ⚠️{infractions['compteur']}" if infractions and infractions.get("compteur", 0) > 0 else ""
-        txt += f"{bl}<b>{safe_html(nom_reel)}</b>{infra_str} — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
+        txt += f"{bl}{certif}<b>{safe_html(nom_reel)}</b>{infra_str} — @{safe_html(uname)} ({ROLE_LABEL.get(role, '?')}) — {date_inscr}\n"
         kb.append([InlineKeyboardButton(f"🔍 Détails {safe_html(nom_reel)[:20]}", callback_data=f"memberinfo:{mid}")])
         if get_role(uid) == "superadmin" and role != "membre":
             kb.append([InlineKeyboardButton(f"⏬ Rétrograder {mid}", callback_data=f"admact:retrograder_membre:{mid}")])
@@ -1710,6 +1770,7 @@ async def handle_member_info(query, uid, parts):
         f"👤 <b>Nom :</b> {safe_html(nom_reel)}\n"
         f"📛 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
         f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
+        f"🔷 <b>Certification :</b> {'Vendeur certifié' if target.get('certifie', False) else 'Non certifié'}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
         f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
@@ -1733,6 +1794,12 @@ async def handle_member_info(query, uid, parts):
         if nb_infractions > 0:
             kb.append([InlineKeyboardButton("🔄 Réinitialiser les avertissements", callback_data=f"admact:reset_infractions:{target_id}")])
         kb.append([InlineKeyboardButton("🔓 Lever la sourdine", callback_data=f"admact:lever_mute:{target_id}")])
+    # ═══ v4.20 : Certification des vendeurs (superadmin uniquement) ═══
+    if get_role(uid) == "superadmin":
+        if target.get("certifie", False):
+            kb.append([InlineKeyboardButton("❌ Retirer la certification", callback_data=f"admact:retirer_certif:{target_id}")])
+        else:
+            kb.append([InlineKeyboardButton("🔷 Certifier ce vendeur", callback_data=f"admact:certifier:{target_id}")])
     kb.append([InlineKeyboardButton("🔙 Retour à la liste", callback_data="memberspage:0")])
     await query.message.edit_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1747,6 +1814,34 @@ async def handle_admin_action(query, ctx, uid, parts):
 
     if act == "liste_membres":
         await handle_members_page(query, ctx, uid, u, ["memberspage", "0"])
+        return
+
+    if act == "certifier":
+        if uid != SUPER_ADMIN_ID: return
+        target = int(parts[2])
+        save_user(target, {"certifie": True})
+        log_audit("CERTIFICATION", f"{target} certifié", uid)
+        await query.message.edit_text(
+            f"🔷 <b>{target} certifié comme vendeur de confiance.</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data=f"memberinfo:{target}")]])
+        )
+        try:
+            await ctx.bot.send_message(target, "🔷 <b>Félicitations !</b> Tu es maintenant un vendeur certifié de confiance.", parse_mode="HTML")
+        except Exception as e:
+            log.warning(f"Notification certification {target}: {e}")
+        return
+
+    if act == "retirer_certif":
+        if uid != SUPER_ADMIN_ID: return
+        target = int(parts[2])
+        save_user(target, {"certifie": False})
+        log_audit("RETRAIT_CERTIFICATION", str(target), uid)
+        await query.message.edit_text(
+            f"❌ Certification retirée pour <b>{target}</b>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data=f"memberinfo:{target}")]])
+        )
         return
 
     if act == "lever_mute":
@@ -2073,6 +2168,156 @@ async def handle_admin_action(query, ctx, uid, parts):
         ]
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
 
+    elif act == "equipe":
+        if uid != SUPER_ADMIN_ID:
+            await query.answer("🚫 Superadmin uniquement.", show_alert=True); return
+        rem_active = cfg.get("remuneration_active", True)
+        etat = "🟢 ACTIVE" if rem_active else "🔴 DÉSACTIVÉE"
+        taux = cfg.get("remuneration_ton_par_point", 0.05)
+        salaires = cfg.get("salaires_fixes", {})
+        # Liste des membres de l'équipe (gérants + admins)
+        equipe = list(db.users.find({"role": {"$in": ["gerant", "admin"]}}))
+        txt = (
+            f"👥 <b>ÉQUIPE & RÉMUNÉRATION</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            f"⚙️ Statut rémunération : <b>{etat}</b>\n"
+            f"💰 Taux : 1 point = <b>{taux} TON</b>\n"
+            f"👥 Membres : <b>{len(equipe)}</b>\n\n"
+            f"📋 <b>Membres de l'équipe :</b>\n"
+        )
+        if not equipe:
+            txt += "\n<i>Aucun gérant/admin pour le moment.</i>"
+        else:
+            for m in equipe:
+                stats = db.team_stats.find_one({"_id": m["_id"]}) or {}
+                pts = stats.get("points_mois", 0)
+                salaire = salaires.get(str(m["_id"]), 0)
+                nom = m.get("first_name", "") or m.get("username", "?")
+                txt += f"• <b>{safe_html(nom)}</b> ({ROLE_LABEL.get(m.get('role','membre'))}) — {pts} pts | Fixe : {salaire} TON\n"
+        kb = [
+            [InlineKeyboardButton("📊 Fiches détaillées", callback_data="admact:equipe_fiches")],
+            [InlineKeyboardButton("⚙️ Config rémunération", callback_data="admact:equipe_config")],
+            [InlineKeyboardButton("📜 Historique paiements", callback_data="admact:historique_paiements")],
+        ]
+        if rem_active:
+            kb.append([InlineKeyboardButton("🔴 Désactiver la rémunération", callback_data="admact:toggle_remuneration")])
+        else:
+            kb.append([InlineKeyboardButton("🟢 Activer la rémunération", callback_data="admact:toggle_remuneration")])
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "equipe_fiches":
+        if uid != SUPER_ADMIN_ID: return
+        equipe = list(db.users.find({"role": {"$in": ["gerant", "admin"]}}))
+        kb = []
+        for m in equipe:
+            nom = m.get("first_name", "") or m.get("username", "?")
+            kb.append([InlineKeyboardButton(f"📊 {safe_html(nom)}", callback_data=f"admact:fiche_gerant:{m['_id']}")])
+        kb.append([InlineKeyboardButton("🔙 Équipe", callback_data="admact:equipe")])
+        await safe_edit(query, f"📊 <b>Fiches des membres</b>\n\nSélectionne un membre :", InlineKeyboardMarkup(kb))
+
+    elif act.startswith("fiche_gerant"):
+        if uid != SUPER_ADMIN_ID: return
+        target = int(parts[2])
+        m = db.users.find_one({"_id": target})
+        if not m:
+            await query.answer("Membre introuvable.", show_alert=True); return
+        stats = db.team_stats.find_one({"_id": target}) or {}
+        pts_mois = stats.get("points_mois", 0)
+        pts_total = stats.get("points_total", 0)
+        actions = stats.get("actions", {})
+        salaires = cfg.get("salaires_fixes", {})
+        salaire = salaires.get(str(target), 0)
+        nom = m.get("first_name", "") or m.get("username", "?")
+        actions_txt = "\n".join([f"• {k.replace('_',' ')} : {v}" for k, v in actions.items()]) if actions else "• Aucune action"
+        txt = (
+            f"📊 <b>FICHE — {safe_html(nom)}</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            f"🎭 Rôle : {ROLE_LABEL.get(m.get('role','membre'))}\n"
+            f"🆔 ID : <code>{target}</code>\n\n"
+            f"⚡ Points ce mois : <b>{pts_mois}</b>\n"
+            f"⚡ Points cumulés : <b>{pts_total}</b>\n"
+            f"💰 Salaire fixe : <b>{salaire} TON/mois</b>\n\n"
+            f"📋 <b>Actions :</b>\n{actions_txt}"
+        )
+        kb = [
+            [InlineKeyboardButton("💰 Modifier salaire fixe", callback_data=f"admact:set_salaire:{target}")],
+            [InlineKeyboardButton("🔙 Équipe", callback_data="admact:equipe")]
+        ]
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "equipe_config":
+        if uid != SUPER_ADMIN_ID: return
+        taux = cfg.get("remuneration_ton_par_point", 0.05)
+        p_ann = cfg.get("points_annonce_validee", 10)
+        p_lit = cfg.get("points_litige_resolu", 20)
+        p_mod = cfg.get("points_modification_validee", 5)
+        p_dem = cfg.get("points_demande_validee", 5)
+        txt = (
+            f"⚙️ <b>CONFIG RÉMUNÉRATION</b>\n\n"
+            f"💰 1 point = {taux} TON\n"
+            f"📋 Points par action :\n"
+            f"• Annonce validée : {p_ann} pts\n"
+            f"• Litige résolu : {p_lit} pts\n"
+            f"• Modification validée : {p_mod} pts\n"
+            f"• Demande validée : {p_dem} pts"
+        )
+        kb = [
+            [InlineKeyboardButton(f"💰 Taux (1 pt = {taux} TON)", callback_data="admact:set_ton_par_point")],
+            [InlineKeyboardButton(f"📋 Annonce ({p_ann} pts)", callback_data="admact:set_pts_annonce")],
+            [InlineKeyboardButton(f"📋 Litige ({p_lit} pts)", callback_data="admact:set_pts_litige")],
+            [InlineKeyboardButton(f"📋 Modification ({p_mod} pts)", callback_data="admact:set_pts_modif")],
+            [InlineKeyboardButton(f"📋 Demande ({p_dem} pts)", callback_data="admact:set_pts_demande")],
+            [InlineKeyboardButton("🔙 Équipe", callback_data="admact:equipe")]
+        ]
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "toggle_remuneration":
+        if uid != SUPER_ADMIN_ID: return
+        nouvel_etat = not cfg.get("remuneration_active", True)
+        db.config.update_one({"type": "global"}, {"$set": {"remuneration_active": nouvel_etat}})
+        log_audit("TOGGLE_REMUNERATION", f"→ {nouvel_etat}", uid)
+        await afficher_admin_root(query, ctx, uid, u)
+
+    elif act == "set_ton_par_point":
+        save_user(uid, {"state": "ADMCFG_TON_PAR_POINT"})
+        await safe_edit(query, "💰 Combien de TON vaut 1 point ? (ex: 0.05) :")
+
+    elif act == "set_pts_annonce":
+        save_user(uid, {"state": "ADMCFG_PTS_ANNONCE"})
+        await safe_edit(query, "📋 Points pour une annonce validée :")
+    elif act == "set_pts_litige":
+        save_user(uid, {"state": "ADMCFG_PTS_LITIGE"})
+        await safe_edit(query, "📋 Points pour un litige résolu :")
+    elif act == "set_pts_modif":
+        save_user(uid, {"state": "ADMCFG_PTS_MODIF"})
+        await safe_edit(query, "📋 Points pour une modification validée :")
+    elif act == "set_pts_demande":
+        save_user(uid, {"state": "ADMCFG_PTS_DEMANDE"})
+        await safe_edit(query, "📋 Points pour une demande validée :")
+
+    elif act.startswith("set_salaire"):
+        if uid != SUPER_ADMIN_ID: return
+        target = int(parts[2])
+        ctx.user_data["salaire_target"] = target
+        save_user(uid, {"state": "ADMCFG_SALAIRE"})
+        await safe_edit(query, f"💰 Salaire fixe mensuel en TON pour <code>{target}</code> (0 = aucun) :")
+
+    elif act == "historique_paiements":
+        if uid != SUPER_ADMIN_ID: return
+        paiements = list(db.team_paiements.find({}).sort("timestamp", -1).limit(15))
+        if not paiements:
+            txt = "📜 <b>Historique des paiements</b>\n\nAucun paiement effectué pour le moment."
+        else:
+            txt = "📜 <b>HISTORIQUE DES PAIEMENTS</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+            for p in paiements:
+                gid = p.get("gerant_id", 0)
+                gu = db.users.find_one({"_id": gid}) or {}
+                nom = gu.get("first_name", "") or gu.get("username", str(gid))
+                txt += f"• <b>{safe_html(nom)}</b> : {p.get('montant_ton', 0)} TON ({p.get('date', '?')})\n"
+        kb = [[InlineKeyboardButton("🔙 Équipe", callback_data="admact:equipe")]]
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
     elif act == "audit_log":
         if uid != SUPER_ADMIN_ID: return
         logs = list(db.audit_logs.find({}).sort("timestamp", -1).limit(15))
@@ -2187,7 +2432,7 @@ async def handle_moderation_demande(query, ctx, parts):
         try:
             await ctx.bot.send_message(PUBLIC_CHANNEL_ID, txt_pub, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_pub))
             db.demandes.update_one({"_id": oid}, {"$set": {"statut": "approuve"}})
-            ton.ajouter_points_gerant(query.from_user.id, 5, "demande_validee")
+            ton.ajouter_points_gerant(query.from_user.id, 0, "demande_validee")
             await ctx.bot.send_message(demande["user_id"], "✅ Votre demande de compte a été validée et publiée sur le canal !")
             await query.message.edit_text("✅ Demande approuvée et publiée.")
         except Exception as e:
@@ -2333,6 +2578,7 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👤 <b>Nom :</b> {safe_html(nom_reel)}\n"
         f"📛 <b>Username :</b> @{safe_html(target.get('username', 'Inconnu'))}\n"
         f"🎭 <b>Rôle :</b> {ROLE_LABEL.get(role, role)}\n"
+        f"🔷 <b>Certification :</b> {'Vendeur certifié' if target.get('certifie', False) else 'Non certifié'}\n"
         f"🌍 <b>Nationalité :</b> {safe_html(target.get('nationalite', 'Non définie'))}\n"
         f"📞 <b>Téléphone :</b> {safe_html(target.get('telephone') or 'Non renseigné')} ({safe_html(target.get('tel_visibilite', 'masque'))})\n"
         f"💼 <b>Wallet TON :</b> <code>{safe_html(target.get('wallet_ton') or 'Non renseigné')}</code>\n"
@@ -2499,6 +2745,94 @@ async def job_notif_tickets(ctx: ContextTypes.DEFAULT_TYPE):
                     log.warning(f"Échec rappel ticket pour {u['_id']}: {e}")
 
 # ══════════════════════════════════════════════════════════════
+#  VÉRIFICATION DISPONIBILITÉ (DIRECT) — v4.20
+# ══════════════════════════════════════════════════════════════
+
+async def job_verif_dispo(ctx: ContextTypes.DEFAULT_TYPE):
+    """Après 24h de contact Direct, demande au vendeur si l'article est toujours dispo."""
+    maintenant = time.time()
+    seuil = maintenant - 24*3600  # transactions de plus de 24h
+    transactions = db.transactions_directes.find({
+        "statut": "en_cours",
+        "verif_dispo_envoyee": {"$ne": True},
+        "date_creation": {"$lt": seuil}
+    })
+    for trx in transactions:
+        ann = db.annonces.find_one({"_id": trx["ann_id"]})
+        if not ann or ann.get("statut") != "approuve":
+            # L'annonce n'existe plus ou n'est plus active
+            db.transactions_directes.update_one({"_id": trx["_id"]}, {"$set": {"statut": "termine"}})
+            continue
+        kb = [[
+            InlineKeyboardButton("✅ Toujours disponible", callback_data=f"dispo:oui:{trx['_id']}"),
+            InlineKeyboardButton("❌ Vendu / retiré", callback_data=f"dispo:non:{trx['_id']}")
+        ]]
+        try:
+            await ctx.bot.send_message(trx["vendeur_id"],
+                f"⏰ <b>Rappel disponibilité</b>\n\n"
+                f"Il y a 24h, un acheteur t'a contacté pour ton annonce :\n"
+                f"🎮 <b>{safe_html(ann.get('categorie', '?'))}</b> ({safe_html(ann.get('prix', '?'))} {safe_html(ann.get('devise', '?'))})\n\n"
+                f"Cet article est-il toujours disponible ?",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            db.transactions_directes.update_one({"_id": trx["_id"]}, {"$set": {"verif_dispo_envoyee": True}})
+        except Exception as e:
+            log.warning(f"Échec rappel dispo pour {trx['vendeur_id']}: {e}")
+
+async def handle_dispo_callback(query, ctx, uid, parts):
+    """Traite la réponse du vendeur sur la disponibilité."""
+    reponse = parts[1]
+    trx_id = parts[2]
+    oid = try_objectid(trx_id)
+    trx = db.transactions_directes.find_one({"_id": oid}) if oid else None
+    if not trx or trx["vendeur_id"] != uid:
+        await query.answer("❌ Transaction introuvable.", show_alert=True)
+        return
+    ann = db.annonces.find_one({"_id": trx["ann_id"]})
+    if reponse == "oui":
+        db.transactions_directes.update_one({"_id": oid}, {"$set": {"statut": "verifie", "verif_date": time.time()}})
+        await query.answer("✅ Merci ! L'annonce reste active.", show_alert=True)
+        try:
+            await query.message.edit_text("✅ <b>Confirmé : l'annonce est toujours disponible.</b>", parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        db.transactions_directes.update_one({"_id": oid}, {"$set": {"statut": "termine", "verif_date": time.time()}})
+        if ann:
+            db.annonces.update_one({"_id": trx["ann_id"]}, {"$set": {"statut": "vendu"}})
+            # Supprimer le message du canal
+            chat_id = ann.get("canal_chat_id")
+            msg_id = ann.get("canal_message_id")
+            if chat_id and msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except Exception as e:
+                    log.warning(f"Échec suppression canal (vendu): {e}")
+        await query.answer("✅ Annonce marquée comme vendue.", show_alert=True)
+        try:
+            await query.message.edit_text("✅ <b>Merci ! L'annonce a été retirée du marché.</b>", parse_mode="HTML")
+        except Exception:
+            pass
+
+# ══════════════════════════════════════════════════════════════
+#  RESET MENSUEL DES POINTS — v4.19
+# ══════════════════════════════════════════════════════════════
+
+async def job_reset_remuneration(ctx: ContextTypes.DEFAULT_TYPE):
+    """Remet à zéro les points mensuels de l'équipe au début de chaque mois."""
+    now = datetime.datetime.now()
+    mois_courant = f"{now.year}-{now.month}"
+    cfg = get_config()
+    dernier_mois = cfg.get("dernier_reset_remuneration", "")
+    if dernier_mois == mois_courant:
+        return  # Déjà fait ce mois-ci
+    # Remettre à zéro les points mensuels
+    result = db.team_stats.update_many({}, {"$set": {"points_mois": 0}})
+    db.config.update_one({"type": "global"}, {"$set": {"dernier_reset_remuneration": mois_courant}})
+    if result.modified_count > 0:
+        log_audit("RESET_REMUNERATION_MENSUEL", f"{result.modified_count} membres remis à zéro", 0)
+        log.info(f"🔄 Points mensuels réinitialisés pour {result.modified_count} membres.")
+
+# ══════════════════════════════════════════════════════════════
 #  NETTOYAGE AUTOMATIQUE — v4.18
 # ══════════════════════════════════════════════════════════════
 
@@ -2561,7 +2895,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.18 démarré — scanner TON + nettoyage auto actifs.")
+    log.info("✅ Bot Market Ultra v4.20 démarré — scanner TON + certification + vérif dispo actifs.")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
@@ -2614,6 +2948,8 @@ def main():
         app.job_queue.run_repeating(job_notif_tickets, interval=86400, first=3600)
         app.job_queue.run_repeating(job_rappel_annonces, interval=3600, first=600)
         app.job_queue.run_repeating(job_nettoyage_auto, interval=86400, first=3600)  # v4.18 : nettoyage quotidien
+        app.job_queue.run_repeating(job_reset_remuneration, interval=86400, first=1800)  # v4.19 : reset mensuel des points
+        app.job_queue.run_repeating(job_verif_dispo, interval=3600, first=600)  # v4.20 : vérif dispo direct (toutes les heures)
 
     log.info("🚀 Lancement du polling Telegram...")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
