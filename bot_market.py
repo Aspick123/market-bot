@@ -1,10 +1,14 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║    BOT MARKET ULTRA v4.21 — PROFIL PROPRE + WALLET SPOILER    ║
+║    BOT MARKET ULTRA v4.23 — DÉPÔT-VENTE (COMPTE VÉRIFIÉ)      ║
 ║   Fichier principal — importe escrow_ton.py pour la crypto   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v4.21 – Profil plus propre + wallet masqué (spoiler Telegram)
+v4.23 – Dépôt-vente : le vendeur soumet son compte AVANT la vente (bouton Mes Annonces)
+- L'admin vérifie (2FA), change email/mdp, stocke les nouvelles infos en mémoire
+- Quand un acheteur paie, le compte vérifié est transmis directement
+- v4.22 – Intermédiation complète : le vendeur transmet son compte à l'admin
+- v4.21 – Profil plus propre + wallet masqué (spoiler Telegram)
 - v4.20 – Certification des vendeurs de confiance + vérification disponibilité (Direct)
 - v4.19 – Gestion d'équipe complète : rémunération hybride (points + salaire fixe)
 - Interrupteur ON/OFF, dashboard équipe, historique paiements, reset mensuel
@@ -413,7 +417,7 @@ async def afficher_menu_principal(update, ctx, uid, u=None, message=None):
     cfg = get_config()
     u = u or get_user(uid)
     txt = (
-        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.21</b>\n"
+        f"🎮 <b>BIENVENUE SUR BOT MARKET ULTRA v4.23</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"Sécurité, Rapidité, Intermédiation automatisée.\n\n"
         f"👑 Rôle : <code>{ROLE_LABEL.get(get_role(uid,u))}</code>\n"
@@ -496,7 +500,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning(f"Impossible de notifier parrain {parrain_id}: {e}")
 
-    # Traiter les liens d'achat (acheter_XXX)
+    # Traiter les liens d'achat (acheter_XXX) et d'intérêt (interesse_XXX)
     if ctx.args:
         arg = ctx.args[0]
         if arg.startswith("acheter_"):
@@ -514,6 +518,40 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await proposer_choix_achat(update.effective_message, ctx, annonce_id, uid)
                 return
+        elif arg.startswith("interesse_"):
+            # ═══ v4.23 : Un acheteur signale son intérêt pour un compte pas encore soumis ═══
+            annonce_id = arg.split("_", 1)[1]
+            oid = try_objectid(annonce_id)
+            ann = db.annonces.find_one({"_id": oid}) if oid else None
+            if not ann:
+                await update.effective_message.reply_text("❌ Annonce introuvable.")
+                return
+            if ann.get("vendeur_id") == uid:
+                await update.effective_message.reply_text("⚠️ C'est ta propre annonce.")
+                return
+            # Prévenir le vendeur
+            try:
+                await ctx.bot.send_message(ann["vendeur_id"],
+                    f"👀 <b>Quelqu'un est intéressé !</b>\n\n"
+                    f"Un acheteur s'intéresse à ton annonce :\n"
+                    f"🎮 <b>{safe_html(ann.get('categorie','?'))}</b> ({safe_html(ann.get('prix','?'))} {safe_html(ann.get('devise','?'))})\n\n"
+                    f"⚠️ Si tu n'as pas encore soumis ton compte, fais-le vite !\n"
+                    f"Tu peux aussi mettre à jour la description si besoin.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✏️ Mettre à jour la description", callback_data=f"viewann:modifier:{oid}"),
+                        InlineKeyboardButton("📤 Soumettre mon compte", callback_data=f"nav:soumettre_compte:{oid}")
+                    ]]))
+            except Exception as e:
+                log.warning(f"Notification intérêt vendeur {ann['vendeur_id']}: {e}")
+            # Confirmer à l'acheteur
+            await update.effective_message.reply_text(
+                f"✅ <b>Ton intérêt a été signalé au vendeur !</b>\n\n"
+                f"Le vendeur a été prévenu et peut mettre à jour la description ou soumettre son compte.\n"
+                f"Tu peux le contacter directement ou attendre sa réponse.",
+                parse_mode="HTML"
+            )
+            return
 
     if uid != SUPER_ADMIN_ID:
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
@@ -1202,16 +1240,52 @@ async def handle_nav(query, ctx, uid, u, parts):
         txt = "📦 <b>VOS ANNONCES :</b>\n\n"
         kb = []
         lbl = {"en_attente": "🟡 En attente", "approuve": "✅ En ligne", "vendu": "🏷️ Vendu", "rejete": "❌ Rejeté", "en_cours": "🔄 En transaction"}
+        lbl_compte = {"soumis": "⏳ Compte en vérification", "verifie": "🔷 Compte vérifié", "non_soumis": "📤 Compte à soumettre"}
         for item in mine:
             st = lbl.get(item.get("statut"), item.get("statut", "?"))
             modif_flag = " ✏️(modif en attente)" if item.get("modification_en_attente") else ""
-            txt += f"{st} — <b>{safe_html(item.get('categorie','?'))}</b> ({safe_html(item.get('prix','?'))}){modif_flag}\n"
+            cstatut = item.get("compte_statut", "non_soumis")
+            clbl = lbl_compte.get(cstatut, "")
+            txt += f"{st} — <b>{safe_html(item.get('categorie','?'))}</b> ({safe_html(item.get('prix','?'))}){modif_flag}\n   {clbl}\n"
             if item.get("statut") == "approuve" and not item.get("modification_en_attente"):
                 kb.append([InlineKeyboardButton(f"✏️ Modifier {item.get('categorie','?')[:15]}", callback_data=f"viewann:modifier:{item['_id']}")])
+            # ═══ v4.23 : Bouton pour soumettre le compte (si approuvé et pas encore soumis) ═══
+            if item.get("statut") == "approuve" and cstatut == "non_soumis":
+                kb.append([InlineKeyboardButton(f"📤 Soumettre mon compte — {item.get('categorie','?')[:15]}", callback_data=f"nav:soumettre_compte:{item['_id']}")])
             if item.get("statut") in ("en_attente", "approuve"):
                 kb.append([InlineKeyboardButton(f"🗑️ Supprimer {item.get('categorie','?')[:15]}", callback_data=f"viewann:suppr:{item['_id']}")])
         kb.append([InlineKeyboardButton("🔙 Menu", callback_data="nav:retour")])
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif cible == "soumettre_compte":
+        # ═══ v4.23 : Le vendeur soumet son compte (avant la vente) ═══
+        annonce_id = parts[2] if len(parts) > 2 else None
+        oid = try_objectid(annonce_id)
+        ann = db.annonces.find_one({"_id": oid}) if oid else None
+        if not ann or ann["vendeur_id"] != uid:
+            await query.answer("❌ Annonce introuvable.", show_alert=True)
+            return
+        if ann.get("statut") != "approuve":
+            await query.answer("⚠️ Cette annonce n'est pas en ligne.", show_alert=True)
+            return
+        if ann.get("compte_statut") in ("soumis", "verifie"):
+            await query.answer("ℹ️ Compte déjà transmis.", show_alert=True)
+            return
+        ctx.user_data["soumettre_annonce_id"] = annonce_id
+        ctx.user_data["soumettre_email"] = None
+        ctx.user_data["soumettre_password"] = None
+        ctx.user_data["soumettre_captures"] = []
+        ctx.user_data["ton_state"] = "soumettre_compte_email"
+        await query.message.reply_text(
+            "⚠️ <b>IMPORTANT — À LIRE AVANT DE TRANSMETTRE :</b>\n\n"
+            "• Une fois ton compte transmis, l'équipe <b>changera l'email et le mot de passe</b>.\n"
+            "• Tu ne pourras plus te connecter sur ce compte.\n"
+            "• 💡 Relie ton compte à une nouvelle adresse email avant, pour garder ton compte principal.\n"
+            "• Tu pourras demander à récupérer ton compte à tout moment.\n\n"
+            "📤 <b>Étape 1/3 :</b> Quel est l'<b>email ou identifiant</b> du compte ?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+        )
 
     elif cible == "leaderboard":
         pipeline = [{"$match": {"statut": "vendu"}}, {"$group": {"_id": "$vendeur_id", "total": {"$sum": 1}}}, {"$sort": {"total": -1}}, {"$limit": 5}]
@@ -1350,6 +1424,51 @@ async def handle_plat(query, ctx, uid, parts):
 
 # ──────────────── MODÉRATION (avec lien contact direct) ────────────────
 
+def construire_badge_compte(statut):
+    """Retourne le badge indiquant l'état du compte sur le canal."""
+    if statut == "verifie":
+        return "🔷 <b>Compte vérifié</b>"
+    elif statut == "soumis":
+        return "⏳ <b>Compte en vérification</b>"
+    return "📤 <b>Compte à soumettre</b>"
+
+def construire_publication_canal(ann, bot_username):
+    """Construit le texte + les boutons d'une publication canal (avec badge compte)."""
+    v = get_user(ann.get("vendeur_id"))
+    badge = " 🔷 <b>Vendeur certifié</b>" if v.get("certifie", False) else ""
+    statut_compte = ann.get("compte_statut", "non_soumis")
+    badge_compte = construire_badge_compte(statut_compte)
+    txt = (
+        f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(ann.get('categorie','').replace(' ', '_'))}\n"
+        f"📱 <code>{safe_html(ann.get('plateforme'))}</code>\n💰 <b>{safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}</b>\n"
+        f"📝 {safe_html(ann.get('description',''))}\n\n"
+        f"{badge_compte}\n"
+        f"👤 Vendeur : @{safe_html(v.get('username'))}{badge}"
+    )
+    kb = []
+    if statut_compte == "verifie":
+        kb.append([InlineKeyboardButton("🛒 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{ann['_id']}")])
+    else:
+        kb.append([InlineKeyboardButton("👀 Je suis intéressé", url=f"https://t.me/{bot_username}?start=interesse_{ann['_id']}")])
+    kb.append([InlineKeyboardButton("💬 Contacter le vendeur", url=f"tg://user?id={ann['vendeur_id']}")])
+    return txt, kb
+
+async def mettre_a_jour_publication_canal(ctx, ann):
+    """Ré-édite le message du canal avec le badge compte à jour."""
+    chat_id = ann.get("canal_chat_id")
+    msg_id = ann.get("canal_message_id")
+    if not chat_id or not msg_id:
+        return
+    try:
+        bot_username = (await ctx.bot.get_me()).username
+        txt, kb = construire_publication_canal(ann, bot_username)
+        if ann.get("photos"):
+            await ctx.bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+    except Exception as e:
+        log.warning(f"Échec mise à jour publication canal: {e}")
+
 async def handle_moderation(query, ctx, parts):
     if not has_level(query.from_user.id, get_user(query.from_user.id), "gerant"):
         await query.answer("🚫 Réservé à l'équipe.", show_alert=True)
@@ -1361,18 +1480,8 @@ async def handle_moderation(query, ctx, parts):
     if act == "approuve":
         item = db.annonces.find_one({"_id": oid})
         if not item: return
-        v = get_user(item["vendeur_id"])
         bot_username = (await ctx.bot.get_me()).username
-        badge = " 🔷 <b>Vendeur certifié</b>" if v.get("certifie", False) else ""
-        txt_pub = (
-            f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(item.get('categorie','').replace(' ', '_'))}\n"
-            f"📱 <code>{safe_html(item.get('plateforme'))}</code>\n💰 <b>{safe_html(item.get('prix'))} {safe_html(item.get('devise'))}</b>\n"
-            f"📝 {safe_html(item.get('description',''))}\n\n👤 Vendeur : @{safe_html(v.get('username'))}{badge}"
-        )
-        kb_pub = [
-            [InlineKeyboardButton("🛒 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")],
-            [InlineKeyboardButton("💬 Contacter le vendeur", url=f"tg://user?id={item['vendeur_id']}")]
-        ]
+        txt_pub, kb_pub = construire_publication_canal(item, bot_username)
         msg_sent = None
         try:
             if item.get("photos"):
@@ -1456,20 +1565,8 @@ async def handle_modification_annonce(query, ctx, parts):
             "modification_en_attente": False
         }})
         updated = db.annonces.find_one({"_id": oid})
-        chat_id, msg_id = updated.get("canal_chat_id"), updated.get("canal_message_id")
-        if chat_id and msg_id:
-            txt_pub = (
-                f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(updated.get('categorie','').replace(' ', '_'))}\n"
-                f"📱 <code>{safe_html(updated.get('plateforme'))}</code>\n💰 <b>{safe_html(updated.get('prix'))} {safe_html(updated.get('devise'))}</b>\n"
-                f"📝 {safe_html(updated.get('description',''))}"
-            )
-            try:
-                if updated.get("photos"):
-                    await ctx.bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=txt_pub, parse_mode="HTML")
-                else:
-                    await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=txt_pub, parse_mode="HTML")
-            except Exception as e:
-                log.warning(f"Échec édition canal : {e}")
+        if updated.get("canal_chat_id") and updated.get("canal_message_id"):
+            await mettre_a_jour_publication_canal(ctx, updated)
         log_audit("MODIF_ANNONCE_APPROUVEE", str(oid), query.from_user.id)
         ton.ajouter_points_gerant(query.from_user.id, 0, "modification_validee")
         try: await ctx.bot.send_message(item["vendeur_id"], "✅ Ta modification a été approuvée et publiée !")
@@ -1509,8 +1606,17 @@ async def handle_view_annonce(query, ctx, parts):
         return
 
     bot_username = (await ctx.bot.get_me()).username
-    txt = f"🎮 <b>{safe_html(item.get('categorie'))}</b>\n\nPrix : {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n{safe_html(item.get('description',''))}"
-    kb = [[InlineKeyboardButton("🤝 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")]]
+    statut_compte = item.get("compte_statut", "non_soumis")
+    txt = (
+        f"🎮 <b>{safe_html(item.get('categorie'))}</b>\n\n"
+        f"Prix : {safe_html(item.get('prix'))} {safe_html(item.get('devise'))}\n"
+        f"{safe_html(item.get('description',''))}\n\n"
+        f"{construire_badge_compte(statut_compte)}"
+    )
+    if statut_compte == "verifie":
+        kb = [[InlineKeyboardButton("🛒 Acheter", url=f"https://t.me/{bot_username}?start=acheter_{item['_id']}")]]
+    else:
+        kb = [[InlineKeyboardButton("👀 Je suis intéressé", url=f"https://t.me/{bot_username}?start=interesse_{item['_id']}")]]
     try:
         if item.get("photos"):
             await ctx.bot.send_photo(query.from_user.id, item["photos"][0], caption=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -1710,6 +1816,7 @@ async def afficher_admin_root(query, ctx, uid, u):
         kb.append([InlineKeyboardButton("🚫 Gérer Blacklist", callback_data="admact:gerer_blacklist")])
         kb.append([InlineKeyboardButton("🎯 Candidatures", callback_data="admact:voir_candidatures")])
         kb.append([InlineKeyboardButton("📊 Dashboard Stats", callback_data="admact:dashboard")])
+        kb.append([InlineKeyboardButton("🛡️ Comptes à vérifier", callback_data="admact:comptes_a_verifier")])
     if get_role(uid, u) == "superadmin":
         kb.append([InlineKeyboardButton("🔄 Recrutement", callback_data="admact:toggle_rec"),
                    InlineKeyboardButton("🚨 Urgence", callback_data="admact:toggle_urg")])
@@ -2173,10 +2280,10 @@ async def handle_admin_action(query, ctx, uid, parts):
         nb_new_users = db.users.count_documents({"date_inscription": {"$gte": debut_semaine}})
         nb_annonces_actives = db.annonces.count_documents({"statut": "approuve"})
         nb_ventes_mois = db.annonces.count_documents({"statut": "vendu", "date_depot": {"$gte": debut_mois}})
-        nb_escrows_actifs = db.escrows.count_documents({"statut": {"$in": ["attente_paiement", "fonds_bloques", "acces_envoyes", "litige"]}})
+        nb_escrows_actifs = db.escrows.count_documents({"statut": {"$in": ["attente_paiement", "fonds_bloques", "litige"]}})
         nb_escrows_termines = db.escrows.count_documents({"statut": "libere"})
         # Total TON en escrow actif
-        escrows_actifs = list(db.escrows.find({"statut": {"$in": ["attente_paiement", "fonds_bloques", "acces_envoyes", "litige"]}}))
+        escrows_actifs = list(db.escrows.find({"statut": {"$in": ["attente_paiement", "fonds_bloques", "litige"]}}))
         total_ton = round(sum(e.get("montant_ton", 0) for e in escrows_actifs), 4)
         nb_litiges_ouverts = db.litiges.count_documents({"statut": "ouvert"})
         nb_blacklist = db.blacklist.count_documents({})
@@ -2352,6 +2459,42 @@ async def handle_admin_action(query, ctx, uid, parts):
                 txt += f"• <b>{safe_html(nom)}</b> : {p.get('montant_ton', 0)} TON ({p.get('date', '?')})\n"
         kb = [[InlineKeyboardButton("🔙 Équipe", callback_data="admact:equipe")]]
         await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "comptes_a_verifier":
+        if not has_level(uid, u, "admin"):
+            await query.answer("🚫 Réservé Admin+.", show_alert=True); return
+        items = list(db.annonces.find({"compte_statut": "soumis"}).limit(10))
+        if not items:
+            await safe_edit(query, "✅ Aucun compte en attente de vérification.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")]])); return
+        txt = f"🛡️ <b>COMPTES À VÉRIFIER</b> ({len(items)})\n\n"
+        kb = []
+        for it in items:
+            txt += f"• {safe_html(it.get('categorie','?'))} — vendeur <code>{it.get('vendeur_id')}</code>\n"
+            kb.append([InlineKeyboardButton(f"✅ Vérifier {it.get('categorie','?')[:20]}", callback_data=f"admact:verifier_compte:{it['_id']}")])
+        kb.append([InlineKeyboardButton("🔙 Admin", callback_data="nav:admin_root")])
+        await safe_edit(query, txt, InlineKeyboardMarkup(kb))
+
+    elif act == "verifier_compte":
+        if not has_level(uid, u, "admin"):
+            await query.answer("🚫 Réservé Admin+.", show_alert=True); return
+        oid = try_objectid(parts[2])
+        ann = db.annonces.find_one({"_id": oid}) if oid else None
+        if not ann:
+            await query.answer("Annonce introuvable.", show_alert=True); return
+        vendeur = get_user(ann.get("vendeur_id"))
+        email_orig = ann.get("compte_email_original", "")
+        password_orig = ann.get("compte_password_original", "")
+        ctx.user_data["verif_compte_ann_id"] = str(oid)
+        save_user(uid, {"state": "VERIF_COMPTE_EMAIL"})
+        txt = (
+            f"🛡️ <b>VÉRIFICATION DU COMPTE</b>\n\n"
+            f"Annonce : {safe_html(ann.get('categorie','?'))}\n"
+            f"Vendeur : @{safe_html(vendeur.get('username','?'))} (<code>{ann.get('vendeur_id')}</code>)\n\n"
+            f"📧 <b>Email original :</b> <tg-spoiler>{safe_html(email_orig)}</tg-spoiler>\n"
+            f"🔑 <b>Mdp original :</b> <tg-spoiler>{safe_html(password_orig)}</tg-spoiler>\n\n"
+            f"Étape 1/2 : Entre le <b>NOUVEL email</b> du compte (après changement) :"
+        )
+        await safe_edit(query, txt)
 
     elif act == "audit_log":
         if uid != SUPER_ADMIN_ID: return
@@ -2680,6 +2823,39 @@ async def handle_admin_states(update, ctx, uid, state, text):
         except Exception:
             await update.message.reply_text("⚠️ ID invalide.")
         return True
+    if state == "VERIF_COMPTE_EMAIL":
+        ctx.user_data["verif_compte_email"] = text.strip()
+        save_user(uid, {"state": "VERIF_COMPTE_PASSWORD"})
+        await update.message.reply_text("🔑 <b>Étape 2/2 :</b> Entre le <b>NOUVEAU mot de passe</b> du compte :", parse_mode="HTML")
+        return True
+    if state == "VERIF_COMPTE_PASSWORD":
+        ann_id = ctx.user_data.get("verif_compte_ann_id")
+        oid = try_objectid(ann_id)
+        email = ctx.user_data.get("verif_compte_email", "")
+        if not oid:
+            await update.message.reply_text("❌ Erreur, annonce introuvable.")
+            save_user(uid, {"state": "IDLE"})
+            return True
+        db.annonces.update_one({"_id": oid}, {"$set": {
+            "compte_statut": "verifie",
+            "compte_email_final": email,
+            "compte_password_final": text.strip(),
+            "compte_date_verification": fmt_date()
+        }})
+        save_user(uid, {"state": "IDLE"})
+        log_audit("COMPTE_VERIFIE", str(oid), uid)
+        ann = db.annonces.find_one({"_id": oid})
+        if ann:
+            # Mettre à jour le message du canal (badge « compte vérifié »)
+            await mettre_a_jour_publication_canal(ctx, ann)
+            try:
+                await ctx.bot.send_message(ann["vendeur_id"], "✅ <b>Ton compte a été vérifié et sécurisé par l'équipe !</b>\nIl est maintenant prêt à être vendu.", parse_mode="HTML")
+            except Exception as e:
+                log.warning(f"Notification vendeur compte vérifié: {e}")
+        await update.message.reply_text("✅ <b>Compte vérifié et enregistré !</b>\n\nLes nouvelles infos sont stockées en mémoire.", parse_mode="HTML")
+        ctx.user_data.pop("verif_compte_ann_id", None)
+        ctx.user_data.pop("verif_compte_email", None)
+        return True
     return False
 
 # ══════════════════════════════════════════════════════════════
@@ -2930,7 +3106,7 @@ async def post_init(application: Application):
         SECURITY_GROUP_ID_NUM = None
 
     ton.demarrer_scanner(application.bot)
-    log.info("✅ Bot Market Ultra v4.21 démarré — profil propre + wallet masqué actifs.")
+    log.info("✅ Bot Market Ultra v4.23 démarré — dépôt-vente (compte vérifié avant la vente).")
 
 async def post_shutdown(application: Application):
     await ton.arreter_scanner()
@@ -2946,11 +3122,11 @@ async def central_text_and_media_handler_v2(update: Update, ctx: ContextTypes.DE
     state = u.get("state", "IDLE")
     text = update.message.text if update.message else None
 
-    if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER"):
+    if uid != SUPER_ADMIN_ID and state not in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER", "VERIF_COMPTE_EMAIL", "VERIF_COMPTE_PASSWORD"):
         if not await verifier_etapes_obligatoires(update, ctx, uid, u):
             return
 
-    if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER") and text:
+    if state in ("ADMIN_BL_ID", "ADMIN_BL_RAISON", "ADMIN_PROMOUVOIR", "ADMIN_RETROGRADER", "VERIF_COMPTE_EMAIL", "VERIF_COMPTE_PASSWORD") and text:
         if await handle_admin_states(update, ctx, uid, state, text):
             return
 

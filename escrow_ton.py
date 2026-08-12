@@ -1,9 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║                  ESCROW_TON.PY v4.2                             ║
+║                  ESCROW_TON.PY v4.4                             ║
 ║  Séquestre TON complet : memo, scan blockchain, conversion   ║
 ║  live, commission auto, double validation, reçus, paie équipe║
-║  v4.2 – Wallets DB + prompt évaluation après transaction       ║
+║  v4.4 – Dépôt-vente : compte vérifié avant la vente           ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Correctifs de sécurité v4.1 (audit) :
@@ -48,7 +48,6 @@ log = logging.getLogger("EscrowTON")
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 TIMEOUT_PAIEMENT_MIN = 30
-TIMEOUT_CONFIRMATION_MIN = 30
 SCAN_INTERVAL_SEC = int(os.environ.get("SCAN_INTERVAL_SEC", "20"))
 
 DELAI_RESOLUTION_LITIGE_JOURS = int(os.environ.get("DELAI_RESOLUTION_LITIGE_JOURS", "7"))
@@ -186,6 +185,17 @@ def save_escrow_update(escrow_id, data: dict):
 # ══════════════════════════════════════════════════════════════
 
 async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: str):
+    # ═══ v4.23 : Le compte doit être vérifié pour pouvoir acheter via Escrow ═══
+    if ann.get("compte_statut") != "verifie":
+        await bot.send_message(
+            acheteur_id,
+            "⚠️ <b>Compte pas encore vérifié</b>\n\n"
+            "Ce compte n'a pas encore été vérifié par l'équipe.\n"
+            "Utilise le bouton « 👀 Je suis intéressé » pour signaler ton intérêt au vendeur.",
+            parse_mode="HTML"
+        )
+        return None
+
     # Vérifier que la config TON est en place
     cfg = get_escrow_config()
     ton_wallet = cfg.get("ton_wallet_address", "")
@@ -262,7 +272,6 @@ async def initier_escrow(bot, ann: dict, acheteur_id: int, acheteur_username: st
         "statut": "attente_paiement",
         "date_creation": fmt_date(now),
         "deadline_paiement": deadline.isoformat(),
-        "deadline_confirmation": None,
         "tx_hash": None,
         "expediteur_wallet": None,
         "vendeur_wallet": None,
@@ -387,46 +396,127 @@ async def matcher_paiements(bot):
 
 async def confirmer_paiement_recu(bot, escrow_id, esc: dict, tx_hash: str, montant: float, expediteur: str):
     now = datetime.datetime.now()
-    deadline_conf = now + datetime.timedelta(minutes=TIMEOUT_CONFIRMATION_MIN)
     save_escrow_update(escrow_id, {
         "statut": "fonds_bloques", "tx_hash": tx_hash, "montant_recu": montant,
-        "expediteur_wallet": expediteur, "deadline_confirmation": deadline_conf.isoformat(),
-        "date_paiement": fmt_date(now)
+        "expediteur_wallet": expediteur, "date_paiement": fmt_date(now)
     })
 
-    kb_v = [[InlineKeyboardButton("📦 J'ai envoyé les accès", callback_data=f"tonact:acces_envoyes:{escrow_id}")]]
-    kb_a = [[
-        InlineKeyboardButton("✅ Confirmer réception", callback_data=f"tonact:confirmer:{escrow_id}"),
-        InlineKeyboardButton("🚨 Litige", callback_data=f"tonact:litige:{escrow_id}")
-    ]]
-    try:
-        await bot.send_message(esc["vendeur_id"],
-            f"🟢 <b>FONDS SÉCURISÉS !</b>\n\n{montant} TON bloqués en séquestre.\nTransmets les accès à l'acheteur puis confirme :",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_v))
-    except Exception as e:
-        log.warning(f"Échec notification vendeur fonds bloqués : {e}")
+    # ═══ v4.23 : Le compte est déjà vérifié/stocqué — l'admin doit le transmettre ═══
     try:
         await bot.send_message(esc["acheteur_id"],
-            f"🟡 <b>PAIEMENT REÇU & SÉCURISÉ</b>\n\n{montant} TON verrouillés. Le vendeur va t'envoyer les accès.\n"
-            f"⏳ Confirme dans les {TIMEOUT_CONFIRMATION_MIN} minutes suivant réception.",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_a))
+            f"🟡 <b>PAIEMENT REÇU & SÉCURISÉ</b>\n\n{montant} TON verrouillés.\n"
+            f"L'équipe va te transmettre le compte vérifié.\n"
+            f"Tu seras contacté très bientôt.",
+            parse_mode="HTML")
     except Exception as e:
         log.warning(f"Échec notification acheteur fonds bloqués : {e}")
 
-async def acces_envoyes(bot, escrow_id, vendeur_id):
-    esc = get_escrow(escrow_id)
-    if not esc or esc["vendeur_id"] != vendeur_id:
-        return
-    save_escrow_update(escrow_id, {"statut": "acces_envoyes"})
-    kb_a = [[
-        InlineKeyboardButton("✅ Confirmer réception", callback_data=f"tonact:confirmer:{escrow_id}"),
-        InlineKeyboardButton("🚨 Litige", callback_data=f"tonact:litige:{escrow_id}")
+    # Notifier l'admin (superadmin + admins) pour qu'il transmette le compte et tranche
+    ann = db.annonces.find_one({"_id": esc["ann_id"]}) or {}
+    compte_email = ann.get("compte_email_final", "") or ann.get("compte_email_original", "")
+    compte_password = ann.get("compte_password_final", "") or ann.get("compte_password_original", "")
+    admin_ids = [int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))]
+    for u in db.users.find({"role": "admin"}):
+        if u["_id"] not in admin_ids:
+            admin_ids.append(u["_id"])
+    kb_admin = [[
+        InlineKeyboardButton("💰 Libérer vendeur", callback_data=f"tonact:forcer_liberer:{escrow_id}"),
+        InlineKeyboardButton("↩️ Rembourser acheteur", callback_data=f"tonact:rembourser:{escrow_id}")
     ]]
+    for aid in admin_ids:
+        try:
+            await bot.send_message(aid,
+                f"🛡️ <b>PAIEMENT REÇU — TRANSMETTRE LE COMPTE</b>\n\n"
+                f"Transaction : ESC{str(escrow_id)[-6:]}\n"
+                f"Acheteur : <code>{esc['acheteur_id']}</code>\n"
+                f"Vendeur : <code>{esc['vendeur_id']}</code>\n"
+                f"Montant : {montant} TON\n\n"
+                f"📧 <b>Compte (email) :</b> <tg-spoiler>{safe_html(compte_email)}</tg-spoiler>\n"
+                f"🔑 <b>Mot de passe :</b> <tg-spoiler>{safe_html(compte_password)}</tg-spoiler>\n\n"
+                f"<i>Transmets le compte à l'acheteur, puis choisis une action :</i>",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_admin))
+        except Exception as e:
+            log.warning(f"Notification admin paiement reçu : {e}")
+
+async def finaliser_soumission_compte(bot, annonce_id, vendeur_id, email, password, captures, super_admin_id):
+    """Le vendeur a soumis son compte (avant la vente) : stocke sur l'annonce et notifie l'admin."""
+    oid = try_objectid(annonce_id)
+    ann = db.annonces.find_one({"_id": oid}) if oid else None
+    if not ann or ann["vendeur_id"] != vendeur_id:
+        return False
+    db.annonces.update_one({"_id": oid}, {"$set": {
+        "compte_statut": "soumis",
+        "compte_email_original": email,
+        "compte_password_original": password,
+        "compte_captures": captures,
+        "compte_date_soumission": fmt_date()
+    }})
+    # Confirmer au vendeur
     try:
-        await bot.send_message(esc["acheteur_id"], "📦 <b>Le vendeur a transmis les accès !</b>\nVérifie puis confirme.",
-                               parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_a))
+        await bot.send_message(vendeur_id,
+            "📤 <b>Compte transmis à l'équipe !</b>\n\n"
+            "L'admin va vérifier ton compte et sécuriser l'accès (changement email/mot de passe).\n"
+            "Il pourra te contacter pour la double identification (2FA).\n\n"
+            "💡 Si tu veux récupérer ton compte plus tard, demande-le à tout moment.",
+            parse_mode="HTML")
     except Exception as e:
-        log.warning(f"Échec notification accès envoyés : {e}")
+        log.warning(f"Notification vendeur soumission : {e}")
+
+    # Notifier l'admin avec le contact du vendeur (pour la 2FA)
+    vendeur = db.users.find_one({"_id": vendeur_id}) or {}
+    vendeur_username = vendeur.get("username", "?")
+    admin_ids = [super_admin_id]
+    for u in db.users.find({"role": "admin"}):
+        if u["_id"] not in admin_ids:
+            admin_ids.append(u["_id"])
+    kb_admin = [[
+        InlineKeyboardButton("💬 Contacter le vendeur", url=f"tg://user?id={vendeur_id}"),
+        InlineKeyboardButton("✅ Vérifier ce compte", callback_data=f"admact:verifier_compte:{oid}")
+    ]]
+    for aid in admin_ids:
+        try:
+            await bot.send_message(aid,
+                f"🛡️ <b>NOUVEAU COMPTE À VÉRIFIER</b>\n\n"
+                f"Annonce : {safe_html(ann.get('categorie', '?'))}\n"
+                f"Vendeur : @{safe_html(vendeur_username)} (<code>{vendeur_id}</code>)\n\n"
+                f"📧 <b>Email :</b> <tg-spoiler>{safe_html(email)}</tg-spoiler>\n"
+                f"🔑 <b>Mot de passe :</b> <tg-spoiler>{safe_html(password)}</tg-spoiler>\n\n"
+                f"⚠️ <b>Contacte le vendeur pour la 2FA</b>, change l'email/mot de passe, "
+                f"puis clique « Vérifier ce compte » pour enregistrer les nouvelles infos.",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_admin))
+            for cap in captures:
+                try:
+                    await bot.send_photo(aid, cap, caption="📸 Capture du compte")
+                except Exception as e:
+                    log.warning(f"Envoi capture à {aid} échoué : {e}")
+        except Exception as e:
+            log.warning(f"Notification admin {aid} soumission compte : {e}")
+
+    # ═══ v4.23 : Mettre à jour le message du canal (badge « compte en vérification ») ═══
+    chat_id = ann.get("canal_chat_id")
+    msg_id = ann.get("canal_message_id")
+    if chat_id and msg_id:
+        try:
+            bot_username = (await bot.get_me()).username
+            v = db.users.find_one({"_id": vendeur_id}) or {}
+            vname = v.get("username", "?")
+            badge = " 🔷 <b>Vendeur certifié</b>" if v.get("certifie", False) else ""
+            txt = (
+                f"📣 <b>COMPTE DISPONIBLE !</b>\n\n🎮 #{safe_html(ann.get('categorie','').replace(' ', '_'))}\n"
+                f"📱 <code>{safe_html(ann.get('plateforme'))}</code>\n💰 <b>{safe_html(ann.get('prix'))} {safe_html(ann.get('devise'))}</b>\n"
+                f"📝 {safe_html(ann.get('description',''))}\n\n"
+                f"⏳ <b>Compte en vérification</b>\n"
+                f"👤 Vendeur : @{safe_html(vname)}{badge}"
+            )
+            kb = [[InlineKeyboardButton("👀 Je suis intéressé", url=f"https://t.me/{bot_username}?start=interesse_{ann['_id']}")],
+                  [InlineKeyboardButton("💬 Contacter le vendeur", url=f"tg://user?id={vendeur_id}")]]
+            if ann.get("photos"):
+                await bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            else:
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        except Exception as e:
+            log.warning(f"Échec mise à jour canal (soumission): {e}")
+    return True
 
 # ══════════════════════════════════════════════════════════════
 #  TRANSFERT TON RÉEL (inchangé)
@@ -479,17 +569,8 @@ async def get_seqno(address: str) -> int:
     return 0
 
 # ══════════════════════════════════════════════════════════════
-#  CONFIRMATION RÉCEPTION → LIBÉRATION DES FONDS (inchangé)
+#  LIBÉRATION DES FONDS (déclenchée par l'admin)
 # ══════════════════════════════════════════════════════════════
-
-async def confirmer_reception(bot, escrow_id, acheteur_id):
-    esc = get_escrow(escrow_id)
-    if not esc or esc["acheteur_id"] != acheteur_id:
-        return
-    if esc["statut"] not in ("fonds_bloques", "acces_envoyes"):
-        return
-    save_escrow_update(escrow_id, {"statut": "confirme", "date_confirmation": fmt_date()})
-    await liberer_fonds(bot, escrow_id, esc)
 
 async def liberer_fonds(bot, escrow_id, esc: dict):
     lock_result = db.escrows.find_one_and_update(
@@ -878,17 +959,6 @@ async def boucle_scanner(bot):
 
 async def verifier_timeouts(bot):
     now = datetime.datetime.now()
-    # Timeout confirmation acheteur (inchangé)
-    for esc in db.escrows.find({"statut": {"$in": ["fonds_bloques", "acces_envoyes"]}}):
-        if not esc.get("deadline_confirmation"):
-            continue
-        try:
-            deadline = datetime.datetime.fromisoformat(esc["deadline_confirmation"])
-            if now > deadline:
-                await rembourser_acheteur(bot, esc["_id"], 0, 0)
-        except Exception as e:
-            log.warning(f"Erreur timeout confirmation : {e}")
-
     # Gestion des litiges avec protection vendeur
     super_admin_id = int(os.environ.get("SUPER_ADMIN_ID", "5117004360"))
     for esc in db.escrows.find({"statut": "litige"}):
@@ -980,15 +1050,7 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
     act = parts[1]
     uid = query.from_user.id
 
-    if act == "confirmer":
-        await confirmer_reception(bot, parts[2], uid)
-        await query.message.reply_text("✅ Réception confirmée, libération en cours...")
-
-    elif act == "acces_envoyes":
-        await acces_envoyes(bot, parts[2], uid)
-        await query.message.reply_text("✅ Notifié à l'acheteur.")
-
-    elif act == "litige":
+    if act == "litige":
         await ouvrir_litige_escrow(bot, parts[2], uid, super_admin_id)
 
     elif act == "annuler":
@@ -1040,6 +1102,29 @@ async def handle_ton_callbacks(query, ctx, bot, super_admin_id: int) -> bool:
 
     elif act == "rapport_remuneration":
         await afficher_rapport_remuneration(query.message)
+
+    elif act == "terminer_compte":
+        # Le vendeur a fini d'envoyer ses captures
+        annonce_id = ctx.user_data.get("soumettre_annonce_id")
+        if not annonce_id:
+            await query.answer("❌ Erreur.", show_alert=True)
+            return True
+        captures = ctx.user_data.get("soumettre_captures", [])
+        if not captures:
+            await query.answer("⚠️ Envoie au moins une capture d'écran.", show_alert=True)
+            return True
+        email = ctx.user_data.get("soumettre_email", "")
+        password = ctx.user_data.get("soumettre_password", "")
+        ok = await finaliser_soumission_compte(bot, annonce_id, uid, email, password, captures, super_admin_id)
+        if ok:
+            ctx.user_data.pop("ton_state", None)
+            ctx.user_data.pop("soumettre_annonce_id", None)
+            ctx.user_data.pop("soumettre_email", None)
+            ctx.user_data.pop("soumettre_password", None)
+            ctx.user_data.pop("soumettre_captures", None)
+            await query.message.reply_text("✅ <b>Compte transmis à l'équipe pour vérification.</b>", parse_mode="HTML")
+        else:
+            await query.message.reply_text("❌ Impossible de transmettre le compte.", parse_mode="HTML")
 
     return True
 
@@ -1097,5 +1182,48 @@ async def handle_ton_input(update, ctx, bot, super_admin_id: int) -> bool:
         ctx.user_data.pop("ton_state", None)
         ctx.user_data.pop("preuve_escrow_id", None)
         return True
+
+    # ═══ v4.22 : Formulaire guidé de soumission du compte (email → password → captures) ═══
+    if state == "soumettre_compte_email":
+        if not text:
+            await update.message.reply_text("⚠️ Envoie l'email ou identifiant en texte.")
+            return True
+        ctx.user_data["soumettre_email"] = text.strip()
+        ctx.user_data["ton_state"] = "soumettre_compte_password"
+        await update.message.reply_text(
+            "📤 <b>Étape 2/3 : Mot de passe</b>\n\nQuel est le <b>mot de passe</b> du compte ?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+        )
+        return True
+
+    if state == "soumettre_compte_password":
+        if not text:
+            await update.message.reply_text("⚠️ Envoie le mot de passe en texte.")
+            return True
+        ctx.user_data["soumettre_password"] = text.strip()
+        ctx.user_data["ton_state"] = "soumettre_compte_captures"
+        await update.message.reply_text(
+            "📤 <b>Étape 3/3 : Captures d'écran</b>\n\n"
+            "Envoie une ou plusieurs captures d'écran du compte (preuves), puis clique sur <b>✅ Terminer</b>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Terminer", callback_data="tonact:terminer_compte")],
+                                                [InlineKeyboardButton("❌ Annuler", callback_data="nav:retour")]])
+        )
+        return True
+
+    if state == "soumettre_compte_captures":
+        if photo:
+            captures = ctx.user_data.get("soumettre_captures", [])
+            captures.append(photo)
+            ctx.user_data["soumettre_captures"] = captures
+            await update.message.reply_text(
+                f"📸 Capture {len(captures)} ajoutée. Envoie d'autres captures ou clique ✅ Terminer.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Terminer", callback_data="tonact:terminer_compte")]])
+            )
+            return True
+        else:
+            await update.message.reply_text("⚠️ Envoie une photo (capture d'écran), pas du texte.")
+            return True
 
     return False
